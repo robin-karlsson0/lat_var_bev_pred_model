@@ -1,23 +1,15 @@
-import glob
-import pickle
-
 import matplotlib as mpl
-# mpl.use('agg')  # Must be before pyplot import to avoid memory leak
+
+mpl.use('agg')  # Must be before pyplot import to avoid memory leak
 import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from pl_bolts.models.autoencoders.components import (resnet18_decoder,
-                                                     resnet18_encoder)
 
 from modules.large_mnist_decoder import LargeMNISTExpDecoder
 from modules.large_mnist_encoder import LargeMNISTExpEncoder
-from modules.residual_decoder import ResidualDecoder
-from modules.residual_encoder import ResidualEncoder
 from modules.unet import UnetDecoder, UnetEncoder
-
-# from utils.visualizations import viz_mixture_preds, viz_preds
 
 
 class LatVarPredModel(pl.LightningModule):
@@ -38,6 +30,8 @@ class LatVarPredModel(pl.LightningModule):
         weight_decay,
         encoder_conv_chs,
         decoder_conv_chs,
+        enc_str,
+        dec_str,
         num_viz_samples,
         num_log_p_samples,
         test_sample_repeat,
@@ -64,36 +58,21 @@ class LatVarPredModel(pl.LightningModule):
         self.prec_rec_samples = 10000
         self.unknown_viz_val = 0.5
 
-        # Models
-        self.encoder = LargeMNISTExpEncoder(self.in_ch, self.enc_dim,
-                                            self.in_size,
-                                            self.encoder_conv_chs)
-        self.decoder = LargeMNISTExpDecoder(self.out_ch, self.enc_dim,
-                                            self.enc_dim + self.lat_dim,
-                                            self.in_size,
-                                            self.decoder_conv_chs)
-        # middle_ch_ratio = 0.25
-        # enc_str = '4x16,4x32,4x64,4x128,4x128,4x256,4x256'
-        # self.encoder = ResidualEncoder(self.in_ch, enc_dim, in_size,
-        #                                middle_ch_ratio, enc_str)
-        # dec_str = '4x256,4x256,4x256,4x128,4x64,4x32,4x16'
-        # self.decoder = ResidualDecoder(self.enc_dim + self.lat_dim, out_ch,
-        #                                middle_ch_ratio, dec_str)
-        # enc_str = f'2x32,2x64,2x128,2x256,2x256,2x512,2x{self.enc_dim}'
-        #           128   64    32    16     8     4     4
-        # self.encoder = UnetEncoder(enc_str)
-        # dec_str = '2x512,2x256,2x256,2x128,2x64,2x32'
-        #                4     8    16    32   64  128
-        # feat_map_flatten_dim = self.enc_dim * 2**2
-        # self.fc_decoder = nn.Sequential(
-        #     nn.Linear(self.enc_dim + self.lat_dim, self.enc_dim, bias=False),
-        #     nn.BatchNorm1d(self.enc_dim),
-        #     nn.LeakyReLU(),
-        #     nn.Linear(self.enc_dim, feat_map_flatten_dim, bias=False),
-        #     nn.BatchNorm1d(feat_map_flatten_dim),
-        #     nn.LeakyReLU(),
-        # )
-        # self.decoder = UnetDecoder(dec_str, self.enc_dim + self.lat_dim)
+        ############
+        #  Models
+        ############
+        # MNIST
+        # self.encoder = LargeMNISTExpEncoder(self.in_ch, self.enc_dim,
+        #                                     self.in_size,
+        #                                     self.encoder_conv_chs)
+        # self.decoder = LargeMNISTExpDecoder(self.out_ch, self.enc_dim,
+        #                                     self.enc_dim + self.lat_dim,
+        #                                     self.in_size,
+        #                                     self.decoder_conv_chs)
+        # Unet
+        self.encoder = UnetEncoder(enc_str)
+        vec_dim = self.enc_dim + self.lat_dim
+        self.decoder = UnetDecoder(dec_str, vec_dim, input_ch=vec_dim)
 
         self.inference_fc = torch.nn.Sequential(
             nn.Linear(self.enc_dim, self.z_hidden_dim),
@@ -129,51 +108,6 @@ class LatVarPredModel(pl.LightningModule):
         #                             weight_decay=self.weight_decay)
         return optimizer
 
-    def viz_test_samples(self, device, num_samples):
-        '''
-        Visualize predictions on a set of test samples M times to qualititively
-        evaluate diverstity.
-        '''
-        x = []
-        m = []
-        for sample_path in self.test_sample_paths:
-            f = open(sample_path, 'rb')
-            x_, m_ = pickle.load(f)
-            m_ = torch.tensor(m_, dtype=torch.bool)
-            x.append(x_)
-            m.append(m_)
-        x = torch.stack(x)
-        m = torch.stack(m)
-        x = x.unsqueeze(1)  # (B,1,H,W)
-        m = m.unsqueeze(1)  # (B,1,H,W)
-
-        x = x.to(device)
-        m = m.to(device)
-
-        x_hats = []
-        for _ in range(num_samples):
-            x_hat, _, _, _ = self.vae(x)
-            x_hats.append(x_hat)
-
-        x_viz = self.unnormalize(x)
-        x_viz[~m] = 0.5
-        B = x_viz.shape[0]
-
-        viz = viz_preds(x_hats[0], x_viz, B)
-        for idx in range(1, num_samples):
-            viz_ = viz_preds(x_hats[idx], x_viz, B)
-            viz = np.concatenate((viz, viz_[32:]))
-
-        size_per_fig = 2
-        plt.figure(figsize=((B * size_per_fig,
-                             (num_samples + 1) * size_per_fig)))
-        plt.imshow(viz)
-        plt.tight_layout()
-
-        self.logger.experiment.add_figure(f'viz_test',
-                                          plt.gcf(),
-                                          global_step=self.current_epoch)
-
     def binary_cross_entropy(self, x_hat, x, obs_mask=None, eps=1e-12):
         log_pxz = x * torch.log(x_hat +
                                 eps) + (1. - x) * torch.log(1. - x_hat + eps)
@@ -208,11 +142,7 @@ class LatVarPredModel(pl.LightningModule):
                            h_lat --> dec() --> x_{t+1}
         '''
 
-        h = self.encoder(x_in)  # MNIST
-        # out_res = 1  # ResEnc
-        # h = h[out_res][:, :, 0, 0]  # ResEnc
-        # h, _ = self.encoder(x_in)  # Unet
-        # h = h.flatten(start_dim=1)
+        h = self.encoder(x_in)
 
         z_mu, z_std = self.qzh(h)
 
@@ -221,13 +151,7 @@ class LatVarPredModel(pl.LightningModule):
 
         enc_vec = torch.cat((h, z), dim=-1)
 
-        # enc_vec = self.fc_decoder(enc_vec)
-        # feat_map = enc_vec.reshape(-1, self.env_dim + self.lat_dim, 2, 2)
-
-        # enc_vec = enc_vec.unsqueeze(-1).unsqueeze(-1)  # ResEnc
         x_hat = self.decoder(enc_vec)
-        # out_res = 128  # ResEnc
-        # x_hat = x_hat[out_res]  # ResEnc
 
         return x_hat
 
@@ -246,8 +170,6 @@ class LatVarPredModel(pl.LightningModule):
                                    └--> dec() --> x_{t+1}
         '''
         x, _ = batch
-
-        # self.val_sample = x
 
         ###############
         #  Input x:s
@@ -280,8 +202,7 @@ class LatVarPredModel(pl.LightningModule):
         ######################
         x_in_w_oracle = torch.cat([x_in, x_oracle])
         h = self.encoder(x_in_w_oracle)
-        # out_res = 1  # ResEnc
-        # h = h[out_res][:, :, 0, 0]  # ResEnc
+
         h, h_oracle = h.chunk(2)
 
         ##########################
@@ -314,10 +235,7 @@ class LatVarPredModel(pl.LightningModule):
         z_oracle = q.rsample()
         h_lat = torch.cat((h, z_oracle), dim=-1)
 
-        # h_lat = h_lat.unsqueeze(-1).unsqueeze(-1)  # ResEnc
         x_hat = self.decoder(h_lat)
-        # out_res = 128  # ResEnc
-        # x_hat = x_hat[out_res]  # ResEnc
 
         recon_loss = self.binary_cross_entropy(x_hat, x_target, m_pred)
 
@@ -341,10 +259,6 @@ class LatVarPredModel(pl.LightningModule):
         self.fc_log_var.train()
         self.decoder.train()
 
-        # if self.val_sample is not None:
-        #     x = self.val_sample
-        # else:
-        #     x, _ = batch
         x, _ = batch
 
         # Remove full observation
@@ -509,6 +423,12 @@ class LatVarPredModel(pl.LightningModule):
         parser.add_argument('--decoder_conv_chs',
                             type=list,
                             default=[64, 32, 16, 8, 4])
+        parser.add_argument('--enc_str',
+                            default='2x32,2x64,2x128,2x256,2x256,2x512,2x256')
+        #                             128   64    32    16     8     4     4
+        parser.add_argument('--dec_str',
+                            default='2x512,2x256,2x256,2x128,2x64,2x32')
+        #                                4     8    16    32   64  128
         parser.add_argument('--num_viz_samples', type=int, default=16)
         parser.add_argument('--num_log_p_samples', type=int, default=128)
         parser.add_argument('--test_sample_repeat', type=int, default=10)
