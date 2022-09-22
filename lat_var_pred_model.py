@@ -82,8 +82,8 @@ class LatVarPredModel(pl.LightningModule):
         self.infernece_log_var = nn.Linear(self.z_hidden_dim, self.lat_dim)
 
         # Posterior q(z|x)
-        self.fc_mu = nn.Linear(self.enc_dim, self.lat_dim)
-        self.fc_log_var = nn.Linear(self.enc_dim, self.lat_dim)
+        self.fc_mu = nn.Linear(self.z_hidden_dim, self.lat_dim)
+        self.fc_log_var = nn.Linear(self.z_hidden_dim, self.lat_dim)
 
         # Print input output layer dimensions
         self.example_input_array = torch.rand(
@@ -332,7 +332,7 @@ class LatVarPredModel(pl.LightningModule):
                     v_pos = (k + 1) * self.in_size + 3
                     plt.text(h_pos, v_pos, msg, color='white')
 
-            self.logger.experiment.add_figure(f'viz',
+            self.logger.experiment.add_figure('viz',
                                               plt.gcf(),
                                               global_step=self.current_epoch)
 
@@ -343,7 +343,7 @@ class LatVarPredModel(pl.LightningModule):
                           num_viz_samples: int) -> np.array:
         '''
         Args:
-            x_hats: List of K prediction batch tensor (B,C,H,W) in interval (0,1)
+            x_hats: List of K pred batch tensor (B,C,H,W) in interval (0,1)
             x: Input batch tensor (B,C,H,W) in interval (0,1).
             num_viz_samples:
 
