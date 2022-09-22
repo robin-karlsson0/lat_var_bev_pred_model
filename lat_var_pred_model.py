@@ -442,6 +442,7 @@ if __name__ == '__main__':
     from datamodules.bev_datamodule import BEVDataModule
 
     parser = ArgumentParser()
+    parser.add_argument('--data_dir', type=str)
     # Add program level args
     # Add model speficic args
     parser = LatVarPredModel.add_model_specific_args(parser)
@@ -453,11 +454,9 @@ if __name__ == '__main__':
     model = LatVarPredModel(**dict_args)
     trainer = pl.Trainer.from_argparse_args(args)
 
-    bev = BEVDataModule(
-        data_dir=
-        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_128px_aug_gt_2',
-        batch_size=args.batch_size,
-        do_extrapolation=False,
-        do_masking=False)
+    bev = BEVDataModule(data_dir=args.data_dir,
+                        batch_size=args.batch_size,
+                        do_extrapolation=False,
+                        do_masking=False)
 
     trainer.fit(model, datamodule=bev)
