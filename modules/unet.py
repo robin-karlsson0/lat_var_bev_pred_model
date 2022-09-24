@@ -116,11 +116,14 @@ class UnetEncoder(pl.LightningModule):
 
 class UnetDecoder(pl.LightningModule):
 
-    def __init__(self,
-                 dec_str: str,
-                 bottleneck_ch,
-                 output_ch=1,
-                 input_ch=None):
+    def __init__(
+        self,
+        dec_str: str,
+        bottleneck_ch,
+        output_ch=1,
+        input_ch=None,
+        output_activation='sigmoid',
+    ):
         '''
         Args:
             dec_str: Sequence of (#layers, #filters).
@@ -173,7 +176,10 @@ class UnetDecoder(pl.LightningModule):
             ch_prev = num_filters
         dec_block.append(
             nn.Conv2d(ch_prev, output_ch, kernel_size=3, stride=1, padding=1))
-        dec_block.append(nn.Sigmoid())
+        if output_activation == 'sigmoid':
+            dec_block.append(nn.Sigmoid())
+        elif output_activation == 'leaky_relu':
+            dec_block.append(nn.LeakyReLU())
         self.dec_blocks.append(nn.Sequential(*dec_block))
 
         # <-- Input decoder for latent variable predictive model

@@ -35,6 +35,7 @@ class LatVarPredModel(pl.LightningModule):
         num_viz_samples,
         num_log_p_samples,
         test_sample_repeat,
+        sample_type,
         **kwargs,
     ):
         super().__init__()
@@ -70,9 +71,38 @@ class LatVarPredModel(pl.LightningModule):
         #                                     self.in_size,
         #                                     self.decoder_conv_chs)
         # Unet
-        self.encoder = UnetEncoder(enc_str)
+        self.encoder = UnetEncoder(enc_str, input_ch=self.in_ch)
         vec_dim = self.enc_dim + self.lat_dim
-        self.decoder = UnetDecoder(dec_str, vec_dim, input_ch=vec_dim)
+        unet_out_ch = int(dec_str.split(',')[-1].split('x')[-1])
+        self.decoder = UnetDecoder(dec_str,
+                                   vec_dim,
+                                   input_ch=vec_dim,
+                                   output_ch=unet_out_ch,
+                                   output_activation='leaky_relu')
+
+        num_hidden_layers = 256
+        self.road_head = torch.nn.Sequential(
+            nn.Conv2d(unet_out_ch,
+                      num_hidden_layers,
+                      kernel_size=3,
+                      stride=1,
+                      padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(num_hidden_layers, 1, kernel_size=3, stride=1,
+                      padding=1),
+            nn.Sigmoid(),
+        )
+        self.intensity_head = torch.nn.Sequential(
+            nn.Conv2d(unet_out_ch,
+                      num_hidden_layers,
+                      kernel_size=3,
+                      stride=1,
+                      padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(num_hidden_layers, 1, kernel_size=3, stride=1,
+                      padding=1),
+            nn.Sigmoid(),
+        )
 
         self.inference_fc = torch.nn.Sequential(
             nn.Linear(self.enc_dim, self.z_hidden_dim),
@@ -88,6 +118,13 @@ class LatVarPredModel(pl.LightningModule):
         # Print input output layer dimensions
         self.example_input_array = torch.rand(
             (32, self.in_ch, self.in_size, self.in_size))
+
+        if sample_type == 'all':
+            self.unpack_sample = self.unpack_sample_all
+        elif sample_type == 'road':
+            self.unpack_sample = self.unpack_sample_road
+        else:
+            raise IOError(f'Undefined type ({type})')
 
         # Static test samples
         # self.test_sample_paths = sorted(
@@ -151,9 +188,88 @@ class LatVarPredModel(pl.LightningModule):
 
         enc_vec = torch.cat((h, z), dim=-1)
 
-        x_hat = self.decoder(enc_vec)
+        out_feat = self.decoder(enc_vec)
+        # 'road' and 'intensity' output head pair
+        road_pred = self.road_head(out_feat)
+        intensity_pred = self.intensity_head(out_feat)
+        x_hat = torch.cat([road_pred, intensity_pred], dim=1)
 
         return x_hat
+
+    def unpack_sample_all(self, x):
+        '''
+        Args:
+            type: String specifying how to unpack samples
+                  'all' --> road semantic + lidar intensity
+                  'road' --> road semantic only
+        '''
+        x_present = x[:, 0:2]
+        x_future = x[:, 2:4]
+        x_full = x[:, 4:6]
+
+        x_target = x_full.clone()
+
+        # Probabilistic value range (0, 1) --> (-1, +1)
+        x_present[:, 0:1] = 2 * x_present[:, 0:1] - 1
+        x_future[:, 0:1] = 2 * x_future[:, 0:1] - 1
+        x_full[:, 0:1] = 2 * x_full[:, 0:1] - 1
+
+        x_in = torch.concat([x_present, x_future])
+        x_oracle = torch.concat([x_full, x_full])
+        x_target = torch.concat([x_target, x_target])
+
+        # Target value thresholding
+        POS_THRESH = 0.75
+        NEG_THRESH = 0.25
+
+        mask = x_target[:, 0] > POS_THRESH
+        x_target[mask, 0] = 1.
+        mask = x_target[:, 0] < NEG_THRESH
+        x_target[mask, 0] = 0.
+
+        m_road = ~(x_target[:, 0] == 0.5)
+        m_road[(x_target[:, 0] < POS_THRESH)
+               & (x_target[:, 0] > NEG_THRESH)] = False
+
+        m_intensity = m_road.clone()
+        m_intensity[x_target[:, 0] < POS_THRESH] = False
+
+        m_target = torch.stack([m_road, m_intensity], dim=1)
+
+        return x_in, x_oracle, x_target, m_target
+
+    def unpack_sample_road(self, x):
+        raise NotImplementedError()
+
+
+#        x_present = x[:, 0:1]
+#        x_future = x[:, 1:2]
+#        x_full = x[:, 2:3]
+#
+#        x_target = x_full
+#
+#        # Probabilistic value range (0, 1) --> (-1, +1)
+#        x_present = 2 * x_present - 1
+#        x_future = 2 * x_future - 1
+#        x_full = 2 * x_full - 1
+#
+#        x_in = torch.concat([x_present, x_future])
+#        x_oracle = torch.concat([x_full, x_full])
+#        x_target = torch.concat([x_target, x_target])
+#
+#        # Target value thresholding
+#        POS_THRESH = 0.75
+#        NEG_THRESH = 0.25
+#
+#        mask = x_target[:, 0] > POS_THRESH
+#        x_target[mask] = 1.
+#        mask = x_target[:, 0] > POS_THRESH
+#        x_target[mask] = 0.
+#
+#        m_pred = ~(x_target == 0.5)
+#        m_pred[(x_target < POS_THRESH) & (x_target > NEG_THRESH)] = False
+#
+#        return x_present, x_future, x_full
 
     def training_step(self, batch, batch_idx):
         '''
@@ -174,28 +290,15 @@ class LatVarPredModel(pl.LightningModule):
         ###############
         #  Input x:s
         ###############
-        x_1_prob = x[:, 0:1]  # Extract 'road_present' tensors
-        x_2_prob = x[:, 1:2]  # Extract 'road_future' tensors
-        x_3_prob = x[:, 2:3]  # Extract 'road_full' tensors
+        x_in, x_oracle, x_target, m_target = self.unpack_sample(x)
+        # x_1_prob = x[:, 0:1]  # Extract 'road_present' tensors
+        # x_2_prob = x[:, 1:2]  # Extract 'road_future' tensors
+        # x_3_prob = x[:, 2:3]  # Extract 'road_full' tensors
 
         # Value range (0, 1) --> (-1, +1)
-        x_1 = 2 * x_1_prob - 1
-        x_2 = 2 * x_2_prob - 1
-        x_3 = 2 * x_3_prob - 1
-
-        x_in = torch.concat([x_1, x_2])
-        x_oracle = torch.concat([x_3, x_3])
-        x_target = torch.concat([x_3_prob, x_3_prob])
-
-        # Target value thresholding
-        POS_THRESH = 0.75
-        NEG_THRESH = 0.25
-
-        x_target[x_target > POS_THRESH] = 1.
-        x_target[x_target < NEG_THRESH] = 0.
-
-        m_pred = ~(x_target == 0.5)
-        m_pred[(x_target < POS_THRESH) & (x_target > NEG_THRESH)] = False
+        # x_1 = 2 * x_1_prob - 1
+        # x_2 = 2 * x_2_prob - 1
+        # x_3 = 2 * x_3_prob - 1
 
         ######################
         #  Encoding vectors
@@ -235,9 +338,13 @@ class LatVarPredModel(pl.LightningModule):
         z_oracle = q.rsample()
         h_lat = torch.cat((h, z_oracle), dim=-1)
 
-        x_hat = self.decoder(h_lat)
+        out_feat = self.decoder(h_lat)
+        # 'road' and 'intensity' output head pair
+        road_pred = self.road_head(out_feat)
+        intensity_pred = self.intensity_head(out_feat)
+        x_hat = torch.cat([road_pred, intensity_pred], dim=1)
 
-        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_pred)
+        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
 
         elbo = kl - recon_loss
         elbo = elbo.mean() + js.mean()
@@ -261,32 +368,33 @@ class LatVarPredModel(pl.LightningModule):
 
         x, _ = batch
 
+        x_in, x_oracle, x_target, m_target = self.unpack_sample(x)
+
         # Remove full observation
-        x_1_prob = x[:, 0:1]  # Extract 'road_present' tensors
-        x_2_prob = x[:, 1:2]  # Extract 'road_future' tensors
-        x_3_prob = x[:, 2:3]  # Extract 'road_full' tensors
+        # x_1_prob = x[:, 0:1]  # Extract 'road_present' tensors
+        # x_2_prob = x[:, 1:2]  # Extract 'road_future' tensors
+        # x_3_prob = x[:, 2:3]  # Extract 'road_full' tensors
 
         # Value range (0, 1) --> (-1, +1)
-        x_1 = 2 * x_1_prob - 1
-        x_2 = 2 * x_2_prob - 1
+        # x_1 = 2 * x_1_prob - 1
+        # x_2 = 2 * x_2_prob - 1
 
-        x_in = torch.concat([x_1, x_2])
-
-        x_target = torch.concat([x_3_prob, x_3_prob])
+        # x_in = torch.concat([x_1, x_2])
+        # x_target = torch.concat([x_3_prob, x_3_prob])
 
         # Target value thresholding
-        POS_THRESH = 0.75
-        NEG_THRESH = 0.25
+        # POS_THRESH = 0.75
+        # NEG_THRESH = 0.25
 
-        x_target[x_target > POS_THRESH] = 1.
-        x_target[x_target < NEG_THRESH] = 0.
+        # x_target[x_target > POS_THRESH] = 1.
+        # x_target[x_target < NEG_THRESH] = 0.
 
-        m_pred = ~(x_target == 0.5)
-        m_pred[(x_target < POS_THRESH) & (x_target > NEG_THRESH)] = False
+        # m_pred = ~(x_target == 0.5)
+        # m_pred[(x_target < POS_THRESH) & (x_target > NEG_THRESH)] = False
 
         x_hat = self.forward(x_in)
 
-        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_pred)
+        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
 
         self.log('val_recon', recon_loss.mean())
 
@@ -310,25 +418,29 @@ class LatVarPredModel(pl.LightningModule):
             x_hats = []
             for _ in range(10):
                 x_hat = self.forward(x_in)
+                x_hat = torch.concat([x_hat[:, 0:1], x_hat[:, 1:2]], dim=3)
                 x_hats.append(x_hat)
 
             # Avoid overshooting batch size
-            num_viz_samples = min(x.shape[0], self.num_viz_samples)
+            num_viz_samples = min(x.shape[0], self.num_viz_samples) * 2
             rows = 1 + 10
 
-            x_in_viz = x_in / 2 + 0.5
+            x_in_viz = x_in
+            x_in_viz[:, 0] = x_in_viz[:, 0] / 2 + 0.5
+            x_in_viz = torch.concat([x_in_viz[:, 0:1], x_in_viz[:, 1:2]],
+                                    dim=3)
             viz = self.viz_mixture_preds(x_hats, x_in_viz, num_viz_samples)
 
-            size_per_fig = 2
+            size_per_fig = 4
             plt.figure(figsize=((num_viz_samples * size_per_fig,
-                                 rows * size_per_fig)))
+                                 rows * size_per_fig / 2)))
             plt.imshow(viz, vmin=0, vmax=1)
             plt.tight_layout()
 
             for sample_idx in range(num_viz_samples):
                 for k in range(10):
                     msg = str(k)
-                    h_pos = sample_idx * self.in_size
+                    h_pos = sample_idx * self.in_size * 2
                     v_pos = (k + 1) * self.in_size + 3
                     plt.text(h_pos, v_pos, msg, color='white')
 
@@ -402,7 +514,7 @@ class LatVarPredModel(pl.LightningModule):
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group('LatVarPredModel')
         parser.add_argument('--batch_size', type=int, default=32)
-        parser.add_argument('--in_ch', type=int, default=1)
+        parser.add_argument('--in_ch', type=int, default=2)
         parser.add_argument('--in_size', type=int, default=128)
         parser.add_argument('--out_ch', type=int, default=1)
         parser.add_argument('--enc_dim',
@@ -432,9 +544,9 @@ class LatVarPredModel(pl.LightningModule):
         parser.add_argument('--num_viz_samples', type=int, default=16)
         parser.add_argument('--num_log_p_samples', type=int, default=128)
         parser.add_argument('--test_sample_repeat', type=int, default=10)
+        parser.add_argument('--sample_type', type=str, default='all')
         # parser.add_argument('', type=int, default=)
         return parent_parser
-
 
 if __name__ == '__main__':
     from argparse import ArgumentParser
@@ -456,6 +568,7 @@ if __name__ == '__main__':
 
     bev = BEVDataModule(data_dir=args.data_dir,
                         batch_size=args.batch_size,
+                        do_rotation=True,
                         do_extrapolation=False,
                         do_masking=False)
 

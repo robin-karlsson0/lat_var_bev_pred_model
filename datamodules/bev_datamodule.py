@@ -48,6 +48,11 @@ class BEVDataset(Dataset):
         self.mask_p_min = mask_p_min
         self.mask_p_max = mask_p_max
 
+        # Road marking intensity transformation
+        self.int_scaler = 20
+        self.int_sep_scaler = 20
+        self.int_mid_threshold = 0.5
+
     def __len__(self):
         return self.num_samples
 
@@ -63,6 +68,17 @@ class BEVDataset(Dataset):
         road_present = road_present.astype(np.float32)
         road_future = road_future.astype(np.float32)
         road_full = road_full.astype(np.float32)
+
+        intensity_present = sample['intensity_present']
+        intensity_future = sample['intensity_future']
+        intensity_full = sample['intensity_full']
+        intensity_present = intensity_present.astype(np.float32)
+        intensity_future = intensity_future.astype(np.float32)
+        intensity_full = intensity_full.astype(np.float32)
+
+        intensity_present = self.road_marking_transform(intensity_present)
+        intensity_future = self.road_marking_transform(intensity_future)
+        intensity_full = self.road_marking_transform(intensity_full)
 
         if self.do_extrapolation:
             pseudo_road_full, _, _ = self.gen_pseudo_bev(road_full)
@@ -80,7 +96,14 @@ class BEVDataset(Dataset):
             mask = road_full == 0.5
             road_full[mask] = pseudo_road_full[mask]
 
-        input_tensor = np.stack([road_present, road_future, road_full])
+        input_tensor = np.stack([
+            road_present,
+            intensity_present,
+            road_future,
+            intensity_future,
+            road_full,
+            intensity_full,
+        ])
         input_tensor = torch.tensor(input_tensor, dtype=torch.float)
 
         # Random rotation
@@ -89,6 +112,21 @@ class BEVDataset(Dataset):
             input_tensor = torch.rot90(input_tensor, k, (-2, -1))
 
         return input_tensor, torch.tensor([0])
+
+    def road_marking_transform(self, intensity_map):
+        '''
+        Args:
+            intensity_map: Value interval (0, 1)
+        '''
+        intensity_map = self.int_scaler * self.sigmoid(
+            self.int_sep_scaler * (intensity_map - self.int_mid_threshold))
+        # Normalization
+        intensity_map[intensity_map > 1.] = 1.
+        return intensity_map
+
+    @staticmethod
+    def sigmoid(z):
+        return 1 / (1 + np.exp(-z))
 
     @staticmethod
     def read_compressed_pickle(path):
@@ -185,25 +223,28 @@ class BEVDataModule(pl.LightningDataModule):
             mask_p_max=mask_p_max,
         )
 
-    def train_dataloader(self):
+    def train_dataloader(self, shuffle=True):
         return DataLoader(
             self.bev_dataset_train,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            shuffle=shuffle,
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self, shuffle=True):
         return DataLoader(
             self.bev_dataset_val,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            shuffle=shuffle,
         )
 
-    def test_dataloader(self):
+    def test_dataloader(self, shuffle=True):
         return DataLoader(
             self.bev_dataset_val,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            shuffle=shuffle,
         )
 
 
@@ -217,26 +258,20 @@ if __name__ == '__main__':
     batch_size = 4
 
     bev = BEVDataModule(
-        '/home/robin/projects/pc-accumulation-lib/bevs_128px_aug',
+        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_aug_gt_3_rev',
         batch_size,
         do_rotation=False)
-    dataloader = bev.train_dataloader()
+    dataloader = bev.train_dataloader(shuffle=False)
 
     for idx, batch in enumerate(dataloader):
 
         input, _ = batch
 
         road_present = input[:, 0]
-        road_future = input[:, 1]
-        road_full = input[:, 2]
-
-        print(idx)
-        for batch_idx in range(batch_size):
-            plt.subplot(3, batch_size, 0 * batch_size + batch_idx + 1)
-            plt.imshow(road_present[batch_idx].numpy())
-            plt.subplot(3, batch_size, 1 * batch_size + batch_idx + 1)
-            plt.imshow(road_future[batch_idx].numpy())
-            plt.subplot(3, batch_size, 2 * batch_size + batch_idx + 1)
-            plt.imshow(road_full[batch_idx].numpy())
+        intensity_present = input[:, 1]
+        road_future = input[:, 2]
+        intensity_future = input[:, 3]
+        road_full = input[:, 4]
+        intensity_full = input[:, 5]
 
         plt.show()
