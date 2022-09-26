@@ -258,7 +258,7 @@ if __name__ == '__main__':
     batch_size = 4
 
     bev = BEVDataModule(
-        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_aug_gt_3_rev',
+        '/home/robin/projects/lat_var_bev_pred_model/bev_single',
         batch_size,
         do_rotation=False)
     dataloader = bev.train_dataloader(shuffle=False)
@@ -273,5 +273,23 @@ if __name__ == '__main__':
         intensity_future = input[:, 3]
         road_full = input[:, 4]
         intensity_full = input[:, 5]
+
+        print(idx)
+        for batch_idx in range(batch_size):
+            # Present
+            plt.subplot(batch_size, 6, batch_idx * 6 + 1)
+            plt.imshow(road_present[batch_idx].numpy())
+            plt.subplot(batch_size, 6, batch_idx * 6 + 2)
+            plt.imshow(intensity_present[batch_idx].numpy())
+            # Future
+            plt.subplot(batch_size, 6, batch_idx * 6 + 3)
+            plt.imshow(road_future[batch_idx].numpy())
+            plt.subplot(batch_size, 6, batch_idx * 6 + 4)
+            plt.imshow(intensity_future[batch_idx].numpy())
+            # Full
+            plt.subplot(batch_size, 6, batch_idx * 6 + 5)
+            plt.imshow(road_full[batch_idx].numpy())
+            plt.subplot(batch_size, 6, batch_idx * 6 + 6)
+            plt.imshow(intensity_full[batch_idx].numpy())
 
         plt.show()
