@@ -194,7 +194,7 @@ class BEVDataModule(pl.LightningDataModule):
         self,
         data_dir: str = "./",
         batch_size: int = 128,
-        num_workers: int = 4,
+        num_workers: int = 0,
         do_rotation: bool = False,
         do_extrapolation=False,
         do_masking=False,
