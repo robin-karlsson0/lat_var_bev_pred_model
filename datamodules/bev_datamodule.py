@@ -57,10 +57,17 @@ class BEVDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        sample_path = self.sample_paths[idx]
-        sample_path = os.path.join(self.abs_root_path, sample_path)
+        while True:
+            sample_path = self.sample_paths[idx]
+            sample_path = os.path.join(self.abs_root_path, sample_path)
 
-        sample = self.read_compressed_pickle(sample_path)
+            sample = self.read_compressed_pickle(sample_path)
+
+            num_obs_elem = np.sum(sample['road_full'] != 0.5)
+            if num_obs_elem > 0:
+                break
+            else:
+                idx = self.get_random_sample_idx()
 
         road_present = sample['road_present']
         road_future = sample['road_future']
@@ -112,6 +119,9 @@ class BEVDataset(Dataset):
             input_tensor = torch.rot90(input_tensor, k, (-2, -1))
 
         return input_tensor, torch.tensor([0])
+
+    def get_random_sample_idx(self):
+        return np.random.randint(0, self.num_samples)
 
     def road_marking_transform(self, intensity_map):
         '''

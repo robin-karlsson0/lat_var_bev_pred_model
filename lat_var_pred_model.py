@@ -157,7 +157,8 @@ class LatVarPredModel(pl.LightningModule):
         if obs_mask is not None:
             log_pxz = obs_mask * log_pxz
 
-        return log_pxz.sum(dim=(1, 2, 3)) / obs_mask.sum(dim=(1, 2, 3))
+        # Avoid NaN for zero observation samples
+        return log_pxz.sum(dim=(1, 2, 3)) / (obs_mask.sum(dim=(1, 2, 3)) + 1.)
 
     def kl_divergence(self, p_mu, p_std, q_mu, q_std):
         '''
@@ -357,8 +358,7 @@ class LatVarPredModel(pl.LightningModule):
                 'train_kl': kl.mean(),
                 'train_js': js.mean(),
                 'train_recon': recon_loss.mean(),
-            },
-            sync_dist=True)
+            })
 
         return elbo
 
@@ -378,7 +378,7 @@ class LatVarPredModel(pl.LightningModule):
 
         recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
 
-        self.log('val_recon', recon_loss.mean(), sync_dist=True)
+        self.log('val_recon', recon_loss.mean())
 
         #        x, _ = batch
         #        x_prob = self.unnormalize(x)
@@ -557,7 +557,7 @@ if __name__ == '__main__':
     bev = BEVDataModule(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        do_rotation=False,  # True,
+        do_rotation= True,
         do_extrapolation=False,
         do_masking=False)
 
