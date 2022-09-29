@@ -27,6 +27,7 @@ class LatVarPredModel(pl.LightningModule):
         lat_dim,
         z_hidden_dim,
         lr,
+        beta,
         weight_decay,
         encoder_conv_chs,
         decoder_conv_chs,
@@ -50,6 +51,7 @@ class LatVarPredModel(pl.LightningModule):
         self.lat_dim = lat_dim
         self.z_hidden_dim = z_hidden_dim
         self.lr = lr
+        self.beta = beta
         self.weight_decay = weight_decay
         self.encoder_conv_chs = encoder_conv_chs
         self.decoder_conv_chs = decoder_conv_chs
@@ -159,6 +161,14 @@ class LatVarPredModel(pl.LightningModule):
 
         # Avoid NaN for zero observation samples
         return log_pxz.sum(dim=(1, 2, 3)) / (obs_mask.sum(dim=(1, 2, 3)) + 1.)
+
+    def mse(self, x_hat, x, obs_mask=None):
+        mse = (x - x_hat)**2
+        if obs_mask is not None:
+            mse = obs_mask * mse
+
+        # Avoid NaN for zero observation samples
+        return mse.sum(dim=(1, 2, 3)) / (obs_mask.sum(dim=(1, 2, 3)) + 1.)
 
     def kl_divergence(self, p_mu, p_std, q_mu, q_std):
         '''
@@ -347,18 +357,43 @@ class LatVarPredModel(pl.LightningModule):
             intensity_pred = self.intensity_head(out_feat)
             x_hat = torch.cat([x_hat, intensity_pred], dim=1)
 
-        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
+        # recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
+        recon_road_loss = self.binary_cross_entropy(
+            x_hat[:, 0:1],
+            x_target[:, 0:1],
+            m_target[:, 0:1],
+        )
 
-        elbo = kl - recon_loss
-        elbo = elbo.mean() + js.mean()
+        elbo = -recon_road_loss
 
-        self.log_dict(
-            {
-                'train_elbo': elbo,
-                'train_kl': kl.mean(),
-                'train_js': js.mean(),
-                'train_recon': recon_loss.mean(),
-            })
+        if self.sample_type == 'all':
+            recon_intensity_loss = self.mse(
+                x_hat[:, 1:2],
+                x_target[:, 1:2],
+                m_target[:, 1:2],
+            )
+            elbo += recon_intensity_loss
+
+        elbo += self.beta * kl
+        elbo = elbo.mean()  # + js.mean()
+
+        # Latent variable metrics
+        z_mu_abs = torch.abs(z_mu.detach())
+        z_mu_oracle_abs = torch.abs(z_mu_oracle.detach())
+        z_std_abs = torch.abs(z_std.detach())
+        z_std_oracle_abs = torch.abs(z_std_oracle.detach())
+
+        self.log_dict({
+            'train_elbo': elbo,
+            'train_kl': kl.mean(),
+            'train_js': js.mean(),
+            'train_recon_road': recon_road_loss.mean(),
+            # 'train_recon_int': recon_intensity_loss.mean(),
+            'z_mu_abs': z_mu_abs.mean(),
+            'z_mu_oracle_abs': z_mu_oracle_abs.mean(),
+            'z_std_abs': z_std_abs.mean(),
+            'z_std_oracle_abs': z_std_oracle_abs.mean(),
+        })
 
         return elbo
 
@@ -515,6 +550,7 @@ class LatVarPredModel(pl.LightningModule):
             default=256,
             help='Inference model output dim (before linear model: mu, std')
         parser.add_argument('--lr', type=float, default=1e-3)
+        parser.add_argument('--beta', type=float, default=1., help='For KL')
         parser.add_argument('--weight_decay', type=float, default=1e-5)
         parser.add_argument('--encoder_conv_chs',
                             type=list,
@@ -554,11 +590,10 @@ if __name__ == '__main__':
     model = LatVarPredModel(**dict_args)
     trainer = pl.Trainer.from_argparse_args(args)
 
-    bev = BEVDataModule(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        do_rotation= True,
-        do_extrapolation=False,
-        do_masking=False)
+    bev = BEVDataModule(data_dir=args.data_dir,
+                        batch_size=args.batch_size,
+                        do_rotation=True,
+                        do_extrapolation=False,
+                        do_masking=False)
 
     trainer.fit(model, datamodule=bev)
