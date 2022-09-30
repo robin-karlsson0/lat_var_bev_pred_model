@@ -579,6 +579,7 @@ if __name__ == '__main__':
 
     parser = ArgumentParser()
     parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--num_workers', type=int, default=0)
     # Add program level args
     # Add model speficic args
     parser = LatVarPredModel.add_model_specific_args(parser)
@@ -590,11 +591,14 @@ if __name__ == '__main__':
     model = LatVarPredModel(**dict_args)
     trainer = pl.Trainer.from_argparse_args(args)
 
-    bev = BEVDataModule(data_dir=args.data_dir,
-                        batch_size=args.batch_size,
-                        do_rotation=True,
-                        do_extrapolation=False,
-                        do_masking=False,
-                        use_preproc=True)
+    bev = BEVDataModule(
+        data_dir=args.data_dir,
+        batch_size=args.batch_size,
+        do_rotation=True,
+        do_extrapolation=False,
+        do_masking=False,
+        use_preproc=True,
+        num_workers=args.num_workers,
+    )
 
     trainer.fit(model, datamodule=bev)
