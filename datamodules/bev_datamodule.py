@@ -198,6 +198,47 @@ class BEVDataset(Dataset):
         return pseudo_bev, pos_dist_field, neg_dist_field
 
 
+class PreprocBEVDataset(BEVDataset):
+    '''
+    '''
+
+    def __init__(
+        self,
+        abs_root_path,
+        do_rotation=False,
+        do_shuffle=False,
+        do_extrapolation=False,
+        do_masking=False,
+        mask_p_min=0.95,
+        mask_p_max=0.99,
+    ):
+        super().__init__(
+            abs_root_path,
+            do_rotation,
+            do_shuffle,
+            do_extrapolation,
+            do_masking,
+            mask_p_min,
+            mask_p_max,
+        )
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+
+        sample_path = self.sample_paths[idx]
+        sample_path = os.path.join(self.abs_root_path, sample_path)
+        sample = self.read_compressed_pickle(sample_path)
+
+        # Random rotation
+        if self.do_rotation:
+            k = random.randrange(0, 4)
+            sample = torch.rot90(sample, k, (-2, -1))
+
+        return sample, torch.tensor([0])
+
+
 class BEVDataModule(pl.LightningDataModule):
 
     def __init__(
@@ -210,28 +251,47 @@ class BEVDataModule(pl.LightningDataModule):
         do_masking=False,
         mask_p_min=0.95,
         mask_p_max=0.99,
+        use_preproc=False,
     ):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
 
-        self.bev_dataset_train = BEVDataset(
-            self.data_dir,
-            do_rotation=do_rotation,
-            do_extrapolation=do_extrapolation,
-            do_masking=do_masking,
-            mask_p_min=mask_p_min,
-            mask_p_max=mask_p_max,
-        )
-        self.bev_dataset_val = BEVDataset(
-            self.data_dir,
-            do_shuffle=True,
-            do_extrapolation=do_extrapolation,
-            do_masking=do_masking,
-            mask_p_min=mask_p_min,
-            mask_p_max=mask_p_max,
-        )
+        if use_preproc:
+            self.bev_dataset_train = PreprocBEVDataset(
+                self.data_dir,
+                do_rotation=do_rotation,
+                do_extrapolation=do_extrapolation,
+                do_masking=do_masking,
+                mask_p_min=mask_p_min,
+                mask_p_max=mask_p_max,
+            )
+            self.bev_dataset_val = PreprocBEVDataset(
+                self.data_dir,
+                do_shuffle=True,
+                do_extrapolation=do_extrapolation,
+                do_masking=do_masking,
+                mask_p_min=mask_p_min,
+                mask_p_max=mask_p_max,
+            )
+        else:
+            self.bev_dataset_train = BEVDataset(
+                self.data_dir,
+                do_rotation=do_rotation,
+                do_extrapolation=do_extrapolation,
+                do_masking=do_masking,
+                mask_p_min=mask_p_min,
+                mask_p_max=mask_p_max,
+            )
+            self.bev_dataset_val = BEVDataset(
+                self.data_dir,
+                do_shuffle=True,
+                do_extrapolation=do_extrapolation,
+                do_masking=do_masking,
+                mask_p_min=mask_p_min,
+                mask_p_max=mask_p_max,
+            )
 
     def train_dataloader(self, shuffle=True):
         return DataLoader(
@@ -258,48 +318,89 @@ class BEVDataModule(pl.LightningDataModule):
         )
 
 
+def write_compressed_pickle(obj, filename, write_dir):
+    '''Converts an object into byte representation and writes a compressed file.
+    Args:
+        obj: Generic Python object.
+        filename: Name of file without file ending.
+        write_dir (str): Output path.
+    '''
+    path = os.path.join(write_dir, f"{filename}.gz")
+    pkl_obj = pickle.dumps(obj)
+    try:
+        with gzip.open(path, "wb") as f:
+            f.write(pkl_obj)
+    except IOError as error:
+        print(error)
+
+
 if __name__ == '__main__':
     '''
     For creating static set of test samples.
     '''
 
-    import matplotlib.pyplot as plt
+    #    import matplotlib.pyplot as plt
 
-    batch_size = 4
+    batch_size = 1
 
     bev = BEVDataModule(
-        '/home/robin/projects/lat_var_bev_pred_model/bev_single',
+        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_aug_gt_3_rev',
         batch_size,
         do_rotation=False)
     dataloader = bev.train_dataloader(shuffle=False)
+
+    num_samples = len(bev.bev_dataset_train)
+
+    bev_idx = 0
+    subdir_idx = 0
+    savedir = 'bev_kitti360_256px_aug_gt_3_rev_preproc'
 
     for idx, batch in enumerate(dataloader):
 
         input, _ = batch
 
-        road_present = input[:, 0]
-        intensity_present = input[:, 1]
-        road_future = input[:, 2]
-        intensity_future = input[:, 3]
-        road_full = input[:, 4]
-        intensity_full = input[:, 5]
+        # Remove batch dim
+        input = input[0]
 
-        print(idx)
-        for batch_idx in range(batch_size):
-            # Present
-            plt.subplot(batch_size, 6, batch_idx * 6 + 1)
-            plt.imshow(road_present[batch_idx].numpy())
-            plt.subplot(batch_size, 6, batch_idx * 6 + 2)
-            plt.imshow(intensity_present[batch_idx].numpy())
-            # Future
-            plt.subplot(batch_size, 6, batch_idx * 6 + 3)
-            plt.imshow(road_future[batch_idx].numpy())
-            plt.subplot(batch_size, 6, batch_idx * 6 + 4)
-            plt.imshow(intensity_future[batch_idx].numpy())
-            # Full
-            plt.subplot(batch_size, 6, batch_idx * 6 + 5)
-            plt.imshow(road_full[batch_idx].numpy())
-            plt.subplot(batch_size, 6, batch_idx * 6 + 6)
-            plt.imshow(intensity_full[batch_idx].numpy())
+        if bev_idx > 1000:
+            bev_idx = 0
+            subdir_idx += 1
+        filename = f'bev_{bev_idx}.pkl'
+        output_path = f'./{savedir}/subdir{subdir_idx:03d}/'
 
-        plt.show()
+        if not os.path.isdir(output_path):
+            os.makedirs(output_path)
+
+        write_compressed_pickle(input, filename, output_path)
+
+        bev_idx += 1
+
+        if idx % 100 == 0:
+            print(f'idx {idx} / {num_samples} ({idx/num_samples*100:.2f}%)')
+
+#        road_present = input[:, 0]
+#        intensity_present = input[:, 1]
+#        road_future = input[:, 2]
+#        intensity_future = input[:, 3]
+#        road_full = input[:, 4]
+#        intensity_full = input[:, 5]
+#
+#        print(idx)
+#        for batch_idx in range(batch_size):
+#            # Present
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 1)
+#            plt.imshow(road_present[batch_idx].numpy())
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 2)
+#            plt.imshow(intensity_present[batch_idx].numpy())
+#            # Future
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 3)
+#            plt.imshow(road_future[batch_idx].numpy())
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 4)
+#            plt.imshow(intensity_future[batch_idx].numpy())
+#            # Full
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 5)
+#            plt.imshow(road_full[batch_idx].numpy())
+#            plt.subplot(batch_size, 6, batch_idx * 6 + 6)
+#            plt.imshow(intensity_full[batch_idx].numpy())
+#
+#        plt.show()

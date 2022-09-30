@@ -594,6 +594,7 @@ if __name__ == '__main__':
                         batch_size=args.batch_size,
                         do_rotation=True,
                         do_extrapolation=False,
-                        do_masking=False)
+                        do_masking=False,
+                        use_preproc=True)
 
     trainer.fit(model, datamodule=bev)
