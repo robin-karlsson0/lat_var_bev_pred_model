@@ -63,11 +63,14 @@ class BEVDataset(Dataset):
 
             sample = self.read_compressed_pickle(sample_path)
 
-            num_obs_elem = np.sum(sample['road_full'] != 0.5)
-            if num_obs_elem > 0:
-                break
-            else:
+            num_obs_elem_present = np.sum(sample['road_present'] != 0.5)
+            num_obs_elem_future = np.sum(sample['road_future'] != 0.5)
+            num_obs_elem_full = np.sum(sample['road_full'] != 0.5)
+            if (num_obs_elem_present == 0 or num_obs_elem_future == 0
+                    or num_obs_elem_full == 0):
                 idx = self.get_random_sample_idx()
+            else:
+                break
 
         road_present = sample['road_present']
         road_future = sample['road_future']
