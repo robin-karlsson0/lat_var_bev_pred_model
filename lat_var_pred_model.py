@@ -290,6 +290,26 @@ class LatVarPredModel(pl.LightningModule):
 
         return x_in, x_oracle, x_target, m_target
 
+    @staticmethod
+    def reorganize_viz_pairs(viz, num_pairs, res):
+        '''
+        Index mapping
+            (0, 3) --> (0, 1)
+            (1, 4) --> (2, 3)
+            (2, 5) --> (4, 5)
+        '''
+        viz_reorg = np.zeros_like(viz)
+        for idx in range(num_pairs):
+            idx_0 = idx * res
+            idx_1 = (idx + num_pairs) * res
+
+            idx_2 = (2 * idx) * res
+            idx_3 = (2 * idx + 1) * res
+            viz_reorg[:, idx_2:idx_2 + res] = viz[:, idx_0:idx_0 + res]
+            viz_reorg[:, idx_3:idx_3 + res] = viz[:, idx_1:idx_1 + res]
+        viz = viz_reorg
+        return viz
+
     def training_step(self, batch, batch_idx):
         '''
                                     Latent distribution encode stochasticity
@@ -443,7 +463,8 @@ class LatVarPredModel(pl.LightningModule):
             view_num = 1
             if self.sample_type == 'all':
                 view_num = 2
-            num_viz_samples = min(x.shape[0], self.num_viz_samples) * view_num
+            num_viz_samples = min(x_in.shape[0],
+                                  self.num_viz_samples) * view_num
             rows = 1 + 10
 
             x_in_viz = x_in
@@ -453,9 +474,14 @@ class LatVarPredModel(pl.LightningModule):
                                         dim=3)
             viz = self.viz_mixture_preds(x_hats, x_in_viz, num_viz_samples)
 
+            # Make columns be ordered by 'present / future' pairs
+            res = x_in.shape[-2]
+            num_pairs = num_viz_samples // 2
+            viz = self.reorganize_viz_pairs(viz, num_pairs, res)
+
             size_per_fig = 4
             plt.figure(figsize=((num_viz_samples * size_per_fig,
-                                 rows * size_per_fig / 2)))
+                                 rows * size_per_fig)))
             plt.imshow(viz, vmin=0, vmax=1)
             plt.tight_layout()
 
