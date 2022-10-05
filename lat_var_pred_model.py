@@ -111,16 +111,21 @@ class LatVarPredModel(pl.LightningModule):
                 nn.Sigmoid(),
             )
 
-        self.inference_fc = torch.nn.Sequential(
+        # Oracle q(z|x)
+        self.inference_fc_oracle = torch.nn.Sequential(
             nn.Linear(self.enc_dim, self.z_hidden_dim),
             nn.LeakyReLU(),
         )
-        self.inference_mu = nn.Linear(self.z_hidden_dim, self.lat_dim)
-        self.infernece_log_var = nn.Linear(self.z_hidden_dim, self.lat_dim)
+        self.fc_mu_oracle = nn.Linear(self.z_hidden_dim, self.lat_dim)
+        self.fc_log_var_oracle = nn.Linear(self.z_hidden_dim, self.lat_dim)
 
-        # Posterior q(z|x)
-        self.fc_mu = nn.Linear(self.z_hidden_dim, self.lat_dim)
-        self.fc_log_var = nn.Linear(self.z_hidden_dim, self.lat_dim)
+        # Prior q(z|x)
+        self.inference_fc_prior = torch.nn.Sequential(
+            nn.Linear(self.enc_dim, self.z_hidden_dim),
+            nn.LeakyReLU(),
+        )
+        self.fc_mu_prior = nn.Linear(self.z_hidden_dim, self.lat_dim)
+        self.fc_log_var_prior = nn.Linear(self.z_hidden_dim, self.lat_dim)
 
         # Print input output layer dimensions
         self.example_input_array = torch.rand(
@@ -177,11 +182,18 @@ class LatVarPredModel(pl.LightningModule):
         return torch.log(q_std) - torch.log(
             p_std) + (p_std**2 + (p_mu - q_mu)**2) / (2 * q_std**2) - 0.5
 
-    def qzh(self, h):
-        z_hidden = self.inference_fc(h)
-        z_mu, z_log_var = self.fc_mu(z_hidden), self.fc_log_var(z_hidden)
+    def qzh_oracle(self, h):
+        z_hidden = self.inference_fc_oracle(h)
+        z_mu = self.fc_mu_oracle(z_hidden)
+        z_log_var = self.fc_log_var_oracle(z_hidden)
         z_std = torch.exp(z_log_var / 2)
+        return z_mu, z_std
 
+    def qzh_prior(self, h):
+        z_hidden = self.inference_fc_prior(h)
+        z_mu = self.fc_mu_prior(z_hidden)
+        z_log_var = self.fc_log_var_prior(z_hidden)
+        z_std = torch.exp(z_log_var / 2)
         return z_mu, z_std
 
     def forward(self, x_in):
@@ -197,7 +209,7 @@ class LatVarPredModel(pl.LightningModule):
 
         h = self.encoder(x_in)
 
-        z_mu, z_std = self.qzh(h)
+        z_mu, z_std = self.qzh_prior(h)
 
         q = torch.distributions.Normal(z_mu, z_std)
         z = q.rsample()
@@ -342,8 +354,8 @@ class LatVarPredModel(pl.LightningModule):
         ##########################
         #  Latent distributions
         ##########################
-        z_mu, z_std = self.qzh(h)
-        z_mu_oracle, z_std_oracle = self.qzh(h_oracle)
+        z_mu, z_std = self.qzh_prior(h)
+        z_mu_oracle, z_std_oracle = self.qzh_oracle(h_oracle)
 
         ###############################
         #  Distribution optimization
@@ -420,9 +432,12 @@ class LatVarPredModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
 
         self.encoder.train()
-        self.inference_fc.train()
-        self.fc_mu.train()
-        self.fc_log_var.train()
+        self.inference_fc_oracle.train()
+        self.fc_mu_oracle.train()
+        self.fc_log_var_oracle.train()
+        self.inference_fc_prior.train()
+        self.fc_mu_prior.train()
+        self.fc_log_var_prior.train()
         self.decoder.train()
 
         x, _ = batch
