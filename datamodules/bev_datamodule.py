@@ -53,6 +53,8 @@ class BEVDataset(Dataset):
         self.int_sep_scaler = 20
         self.int_mid_threshold = 0.5
 
+        self.min_elements = 0.01 * 256 * 256
+
     def __len__(self):
         return self.num_samples
 
@@ -66,8 +68,9 @@ class BEVDataset(Dataset):
             num_obs_elem_present = np.sum(sample['road_present'] != 0.5)
             num_obs_elem_future = np.sum(sample['road_future'] != 0.5)
             num_obs_elem_full = np.sum(sample['road_full'] != 0.5)
-            if (num_obs_elem_present == 0 or num_obs_elem_future == 0
-                    or num_obs_elem_full == 0):
+            if (num_obs_elem_present < self.min_elements
+                    or num_obs_elem_future < self.min_elements
+                    or num_obs_elem_full < self.min_elements):
                 idx = self.get_random_sample_idx()
             else:
                 break
