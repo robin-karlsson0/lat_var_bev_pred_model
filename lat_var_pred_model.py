@@ -95,21 +95,6 @@ class LatVarPredModel(pl.LightningModule):
                       padding=1),
             nn.Sigmoid(),
         )
-        if self.sample_type == 'all':
-            self.intensity_head = torch.nn.Sequential(
-                nn.Conv2d(unet_out_ch,
-                          num_hidden_layers,
-                          kernel_size=3,
-                          stride=1,
-                          padding=1),
-                nn.LeakyReLU(),
-                nn.Conv2d(num_hidden_layers,
-                          1,
-                          kernel_size=3,
-                          stride=1,
-                          padding=1),
-                nn.Sigmoid(),
-            )
 
         # Oracle q(z|x)
         self.inference_fc_oracle = torch.nn.Sequential(
@@ -131,9 +116,7 @@ class LatVarPredModel(pl.LightningModule):
         self.example_input_array = torch.rand(
             (32, self.in_ch, self.in_size, self.in_size))
 
-        if self.sample_type == 'all':
-            self.unpack_sample = self.unpack_sample_all
-        elif self.sample_type == 'road':
+        if self.sample_type == 'road':
             self.unpack_sample = self.unpack_sample_road
         else:
             raise IOError(f'Undefined type ({type})')
@@ -220,9 +203,6 @@ class LatVarPredModel(pl.LightningModule):
         # 'road' and 'intensity' output head pair
         road_pred = self.road_head(out_feat)
         x_hat = road_pred
-        if self.sample_type == 'all':
-            intensity_pred = self.intensity_head(out_feat)
-            x_hat = torch.cat([x_hat, intensity_pred], dim=1)
 
         return x_hat
 
@@ -385,9 +365,6 @@ class LatVarPredModel(pl.LightningModule):
         # 'road' and 'intensity' output head pair
         road_pred = self.road_head(out_feat)
         x_hat = road_pred
-        if self.sample_type == 'all':
-            intensity_pred = self.intensity_head(out_feat)
-            x_hat = torch.cat([x_hat, intensity_pred], dim=1)
 
         # recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
         recon_road_loss = self.binary_cross_entropy(
@@ -397,14 +374,6 @@ class LatVarPredModel(pl.LightningModule):
         )
 
         elbo = -recon_road_loss
-
-        if self.sample_type == 'all':
-            recon_intensity_loss = self.mse(
-                x_hat[:, 1:2],
-                x_target[:, 1:2],
-                m_target[:, 1:2],
-            )
-            elbo += recon_intensity_loss
 
         elbo += self.beta * kl
         elbo = elbo.mean()  # + js.mean()
@@ -420,7 +389,6 @@ class LatVarPredModel(pl.LightningModule):
             'train_kl': kl.mean(),
             'train_js': js.mean(),
             'train_recon_road': recon_road_loss.mean(),
-            # 'train_recon_int': recon_intensity_loss.mean(),
             'z_mu_abs': z_mu_abs.mean(),
             'z_mu_oracle_abs': z_mu_oracle_abs.mean(),
             'z_std_abs': z_std_abs.mean(),
@@ -470,23 +438,16 @@ class LatVarPredModel(pl.LightningModule):
             x_hats = []
             for _ in range(10):
                 x_hat = self.forward(x_in)
-                if self.sample_type == 'all':
-                    x_hat = torch.concat([x_hat[:, 0:1], x_hat[:, 1:2]], dim=3)
                 x_hats.append(x_hat)
 
             # Avoid overshooting batch size
             view_num = 1
-            if self.sample_type == 'all':
-                view_num = 2
             num_viz_samples = min(x_in.shape[0],
                                   self.num_viz_samples) * view_num
             rows = 1 + 10
 
             x_in_viz = x_in
             x_in_viz[:, 0] = x_in_viz[:, 0] / 2 + 0.5
-            if self.sample_type == 'all':
-                x_in_viz = torch.concat([x_in_viz[:, 0:1], x_in_viz[:, 1:2]],
-                                        dim=3)
             viz = self.viz_mixture_preds(x_hats, x_in_viz, num_viz_samples)
 
             # Make columns be ordered by 'present / future' pairs
@@ -608,7 +569,7 @@ class LatVarPredModel(pl.LightningModule):
         parser.add_argument('--num_viz_samples', type=int, default=16)
         parser.add_argument('--num_log_p_samples', type=int, default=128)
         parser.add_argument('--test_sample_repeat', type=int, default=10)
-        parser.add_argument('--sample_type', type=str, default='all')
+        parser.add_argument('--sample_type', type=str, default='road')
         # parser.add_argument('', type=int, default=)
         return parent_parser
 
