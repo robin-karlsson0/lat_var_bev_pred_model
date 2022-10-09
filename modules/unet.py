@@ -35,15 +35,20 @@ class UnetEncoder(pl.LightningModule):
                               num_filters,
                               kernel_size=3,
                               stride=1,
-                              padding=1))
+                              padding=1,
+                              bias=False))
                 enc_block.append(nn.BatchNorm2d(num_filters)),
                 enc_block.append(nn.LeakyReLU())
                 ch_prev = num_filters
             self.enc_blocks.append(nn.Sequential(*enc_block))
 
             downsampler = nn.Sequential(
-                nn.Conv2d(ch_prev, ch_prev, kernel_size=3, stride=2,
-                          padding=1),
+                nn.Conv2d(ch_prev,
+                          ch_prev,
+                          kernel_size=3,
+                          stride=2,
+                          padding=1,
+                          bias=False),
                 nn.BatchNorm2d(ch_prev),
                 nn.LeakyReLU(),
             )
@@ -61,7 +66,8 @@ class UnetEncoder(pl.LightningModule):
                           num_filters,
                           kernel_size=3,
                           stride=1,
-                          padding=1))
+                          padding=1,
+                          bias=False))
             bottleneck.append(nn.BatchNorm2d(num_filters)),
             bottleneck.append(nn.LeakyReLU())
             ch_prev = num_filters
@@ -71,7 +77,7 @@ class UnetEncoder(pl.LightningModule):
         self.fc_encoder = nn.Sequential(
             nn.Linear(4 * ch_prev, ch_prev, bias=False),
             nn.BatchNorm1d(ch_prev),
-            nn.LeakyReLU(),
+            nn.Tanh(),
         )
         # -->
 
@@ -156,7 +162,8 @@ class UnetDecoder(pl.LightningModule):
                               num_filters,
                               kernel_size=3,
                               stride=1,
-                              padding=1))
+                              padding=1,
+                              bias=False))
                 dec_block.append(nn.BatchNorm2d(num_filters)),
                 dec_block.append(nn.LeakyReLU())
                 ch_prev = num_filters
@@ -170,7 +177,8 @@ class UnetDecoder(pl.LightningModule):
                           num_filters,
                           kernel_size=3,
                           stride=1,
-                          padding=1))
+                          padding=1,
+                          bias=False))
             dec_block.append(nn.BatchNorm2d(num_filters)),
             dec_block.append(nn.LeakyReLU())
             ch_prev = num_filters
