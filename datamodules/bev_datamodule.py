@@ -307,7 +307,7 @@ class BEVDataModule(pl.LightningDataModule):
             shuffle=shuffle,
         )
 
-    def val_dataloader(self, shuffle=True):
+    def val_dataloader(self, shuffle=False):
         return DataLoader(
             self.bev_dataset_val,
             batch_size=self.batch_size,
@@ -315,7 +315,7 @@ class BEVDataModule(pl.LightningDataModule):
             shuffle=shuffle,
         )
 
-    def test_dataloader(self, shuffle=True):
+    def test_dataloader(self, shuffle=False):
         return DataLoader(
             self.bev_dataset_val,
             batch_size=self.batch_size,
