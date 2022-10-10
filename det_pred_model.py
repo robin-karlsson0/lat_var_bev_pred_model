@@ -13,7 +13,7 @@ from modules.large_mnist_encoder import LargeMNISTExpEncoder
 from modules.unet import UnetDecoder, UnetEncoder
 
 
-class LatVarPredModel(pl.LightningModule):
+class DetPredModel(pl.LightningModule):
     '''
     Ref: https://github.com/williamFalcon/pytorch-lightning-vae/blob/main/vae.py
     '''
@@ -244,7 +244,7 @@ class LatVarPredModel(pl.LightningModule):
         # 'road' and 'intensity' output head pair
         # road_pred = self.road_head(out_feat)
 
-        return x_hat
+        return x_hat, h
 
     def training_step(self, batch, batch_idx):
         '''
@@ -278,20 +278,20 @@ class LatVarPredModel(pl.LightningModule):
         ################
         recon_loss = -self.binary_cross_entropy(x_hat, x_target, m_target)
 
-        elbo = recon_loss
+        loss = recon_loss
 
-        elbo = elbo.mean()  # + js.mean()
+        loss = loss.mean()  # + js.mean()
 
         # Variable metrics
         h_abs = torch.abs(h.detach())
 
         self.log_dict({
-            'train_elbo': elbo,
+            'train_loss': loss,
             'train_recon_road': recon_loss.mean(),
             'train_h_abs': h_abs.mean(),
         })
 
-        return elbo
+        return loss
 
     def validation_step(self, batch, batch_idx):
 
@@ -302,12 +302,14 @@ class LatVarPredModel(pl.LightningModule):
 
         x_in, x_oracle, x_target, m_target = self.unpack_sample(x)
 
-        x_hats = self.forward(x_in)
+        x_hats, h = self.forward(x_in)
 
         # Find smallest reconstruction loss among all modes
         recon_loss = -self.binary_cross_entropy(x_hats, x_target, m_target)
 
         self.log('val_recon', recon_loss.mean())
+
+        self.logger.experiment.add_histogram('h', h, self.current_epoch)
 
         #        x, _ = batch
         #        x_prob = self.unnormalize(x)
@@ -458,21 +460,23 @@ if __name__ == '__main__':
     from datamodules.bev_datamodule import BEVDataModule
 
     parser = ArgumentParser()
-    parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--train_data_dir', type=str)
+    parser.add_argument('--val_data_dir', type=str)
     parser.add_argument('--num_workers', type=int, default=0)
     # Add program level args
     # Add model speficic args
-    parser = LatVarPredModel.add_model_specific_args(parser)
+    parser = DetPredModel.add_model_specific_args(parser)
     # Add all the vailable trainer option to argparse
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
     dict_args = vars(args)
-    model = LatVarPredModel(**dict_args)
+    model = DetPredModel(**dict_args)
     trainer = pl.Trainer.from_argparse_args(args)
 
     bev = BEVDataModule(
-        data_dir=args.data_dir,
+        train_data_dir=args.train_data_dir,
+        val_data_dir=args.val_data_dir,
         batch_size=args.batch_size,
         do_rotation=True,
         do_extrapolation=False,
