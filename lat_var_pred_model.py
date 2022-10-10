@@ -6,6 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 
 from modules.large_mnist_decoder import LargeMNISTExpDecoder
 from modules.large_mnist_encoder import LargeMNISTExpEncoder
@@ -26,8 +27,10 @@ class LatVarPredModel(pl.LightningModule):
         enc_dim,
         lat_dim,
         z_hidden_dim,
+        y_dim,
         lr,
-        beta,
+        beta_oracle,
+        beta_mix,
         weight_decay,
         encoder_conv_chs,
         decoder_conv_chs,
@@ -50,8 +53,10 @@ class LatVarPredModel(pl.LightningModule):
         self.enc_dim = enc_dim
         self.lat_dim = lat_dim
         self.z_hidden_dim = z_hidden_dim
+        self.y_dim = y_dim
         self.lr = lr
-        self.beta = beta
+        self.beta_oracle = beta_oracle
+        self.beta_mix = beta_mix
         self.weight_decay = weight_decay
         self.encoder_conv_chs = encoder_conv_chs
         self.decoder_conv_chs = decoder_conv_chs
@@ -76,25 +81,26 @@ class LatVarPredModel(pl.LightningModule):
         # Unet
         self.encoder = UnetEncoder(enc_str, input_ch=self.in_ch)
         vec_dim = self.enc_dim + self.lat_dim
-        unet_out_ch = int(dec_str.split(',')[-1].split('x')[-1])
+        unet_out_ch = 1  # int(dec_str.split(',')[-1].split('x')[-1])
         self.decoder = UnetDecoder(dec_str,
                                    vec_dim,
                                    input_ch=vec_dim,
                                    output_ch=unet_out_ch,
-                                   output_activation='leaky_relu')
+                                   output_activation='sigmoid')
+        # output_activation='leaky_relu')
 
-        num_hidden_layers = 256
-        self.road_head = torch.nn.Sequential(
-            nn.Conv2d(unet_out_ch,
-                      num_hidden_layers,
-                      kernel_size=3,
-                      stride=1,
-                      padding=1),
-            nn.LeakyReLU(),
-            nn.Conv2d(num_hidden_layers, 1, kernel_size=3, stride=1,
-                      padding=1),
-            nn.Sigmoid(),
-        )
+        # num_hidden_layers = 256
+        # self.road_head = torch.nn.Sequential(
+        #     nn.Conv2d(unet_out_ch,
+        #               num_hidden_layers,
+        #               kernel_size=3,
+        #               stride=1,
+        #               padding=1),
+        #     nn.LeakyReLU(),
+        #     nn.Conv2d(num_hidden_layers, 1, kernel_size=3, stride=1,
+        #               padding=1),
+        #     nn.Sigmoid(),
+        # )
 
         # Oracle q(z|x)
         self.inference_fc_oracle = torch.nn.Sequential(
@@ -104,9 +110,9 @@ class LatVarPredModel(pl.LightningModule):
         self.fc_mu_oracle = nn.Linear(self.z_hidden_dim, self.lat_dim)
         self.fc_log_var_oracle = nn.Linear(self.z_hidden_dim, self.lat_dim)
 
-        # Prior q(z|x)
+        # Prior q(z|xh)
         self.inference_fc_prior = torch.nn.Sequential(
-            nn.Linear(self.enc_dim, self.z_hidden_dim),
+            nn.Linear(self.enc_dim + self.y_dim, self.z_hidden_dim),
             nn.LeakyReLU(),
         )
         self.fc_mu_prior = nn.Linear(self.z_hidden_dim, self.lat_dim)
@@ -148,15 +154,8 @@ class LatVarPredModel(pl.LightningModule):
             log_pxz = obs_mask * log_pxz
 
         # Avoid NaN for zero observation samples
-        return log_pxz.sum(dim=(1, 2, 3)) / (obs_mask.sum(dim=(1, 2, 3)) + 1.)
-
-    def mse(self, x_hat, x, obs_mask=None):
-        mse = (x - x_hat)**2
-        if obs_mask is not None:
-            mse = obs_mask * mse
-
-        # Avoid NaN for zero observation samples
-        return mse.sum(dim=(1, 2, 3)) / (obs_mask.sum(dim=(1, 2, 3)) + 1.)
+        num_elems = (obs_mask.sum(dim=(-3, -2, -1)) + 1.)
+        return log_pxz.sum(dim=(-3, -2, -1)) / num_elems
 
     def kl_divergence(self, p_mu, p_std, q_mu, q_std):
         '''
@@ -172,39 +171,12 @@ class LatVarPredModel(pl.LightningModule):
         z_std = torch.exp(z_log_var / 2)
         return z_mu, z_std
 
-    def qzh_prior(self, h):
-        z_hidden = self.inference_fc_prior(h)
+    def qzh_prior(self, hy):
+        z_hidden = self.inference_fc_prior(hy)
         z_mu = self.fc_mu_prior(z_hidden)
         z_log_var = self.fc_log_var_prior(z_hidden)
         z_std = torch.exp(z_log_var / 2)
         return z_mu, z_std
-
-    def forward(self, x_in):
-        '''
-                                 Latent distribution encode stochasticity
-        x_{t} --> enc() --> h--> q(z|h) --> N(mu, std) --> z_{t+1}
-                            |                                |
-                            ├--------------------------------┘
-                            |
-                            v
-                           h_lat --> dec() --> x_{t+1}
-        '''
-
-        h = self.encoder(x_in)
-
-        z_mu, z_std = self.qzh_prior(h)
-
-        q = torch.distributions.Normal(z_mu, z_std)
-        z = q.rsample()
-
-        enc_vec = torch.cat((h, z), dim=-1)
-
-        out_feat = self.decoder(enc_vec)
-        # 'road' and 'intensity' output head pair
-        road_pred = self.road_head(out_feat)
-        x_hat = road_pred
-
-        return x_hat
 
     def unpack_sample_all(self, x):
         '''
@@ -302,6 +274,104 @@ class LatVarPredModel(pl.LightningModule):
         viz = viz_reorg
         return viz
 
+    def forward(self, x_in):
+        '''
+                                 Latent distribution encode stochasticity
+        x_{t} --> enc() --> h--> q(z|h) --> N(mu, std) --> z_{t+1}
+                            |                                |
+                            ├--------------------------------┘
+                            |
+                            v
+                           h_lat --> dec() --> x_{t+1}
+        '''
+        B = x_in.shape[0]
+        device = x_in.get_device()
+
+        h = self.encoder(x_in)
+
+        ################
+        #  Multimodal
+        ################
+        y = torch.eye(self.y_dim, device=device)  # (K, K)
+
+        hs = []
+        x_hats = []
+        B = h.shape[0]
+        z_mus = []
+        z_stds = []
+        for mixture_idx in range(self.y_dim):
+
+            y_ = y[:, mixture_idx:mixture_idx + 1]  # (K, 1)
+            y_ = y_.T  # (1, K)
+            y_ = torch.tile(y_, (B, 1))  # Y matrix (B, K)
+
+            hy = torch.cat([h, y_], dim=1)  # (B, E+K)
+
+            ##########################
+            #  Latent distributions
+            ##########################
+            z_mu, z_std = self.qzh_prior(hy)
+
+            q = torch.distributions.Normal(z_mu, z_std)
+            z = q.rsample()
+            hs.append(h)
+            z_mus.append(z_mu)
+            z_stds.append(z_std)
+
+            enc_vec = torch.cat((h, z), dim=-1)
+
+            x_hat = self.decoder(enc_vec)
+            # 'road' and 'intensity' output head pair
+            # road_pred = self.road_head(out_feat)
+
+            # x_hat = road_pred
+            x_hats.append(x_hat)
+
+        # Convert 'mixture ordered' list --> 'sample ordered' tensor
+        x_hats = torch.stack(x_hats)  # (K, B, H, W)
+        x_hats = torch.transpose(x_hats, 1, 0)  # (B, K, H, W)
+
+        hs = torch.stack(hs)
+        hs = torch.transpose(hs, 1, 0)
+
+        z_mus = torch.stack(z_mus)
+        z_mus = torch.transpose(z_mus, 1, 0)
+
+        z_stds = torch.stack(z_stds)
+        z_stds = torch.transpose(z_stds, 1, 0)
+
+        return x_hats, hs, z_mus, z_stds
+
+    def forward_oracle(self, x_in, x_oracle):
+
+        ######################
+        #  Encoding vectors
+        ######################
+        x_in_w_oracle = torch.cat([x_in, x_oracle])
+        h = self.encoder(x_in_w_oracle)
+
+        h, h_oracle = h.chunk(2)
+
+        ##########################
+        #  Latent distributions
+        ##########################
+        z_mu_oracle, z_std_oracle = self.qzh_oracle(h_oracle)
+
+        ################
+        #  Prediction
+        ################
+        # Encoding h_{t} with oracle z_{t+1}
+        q = torch.distributions.Normal(z_mu_oracle, z_std_oracle)
+        z_oracle = q.rsample()
+        h_lat = torch.cat((h, z_oracle), dim=-1)
+
+        x_hat = self.decoder(h_lat)
+        # 'road' and 'intensity' output head pair
+        # road_pred = self.road_head(out_feat)
+        # x_hat = road_pred
+
+        return x_hat, h, z_mu_oracle, z_std_oracle
+
     def training_step(self, batch, batch_idx):
         '''
                                     Latent distribution encode stochasticity
@@ -317,6 +387,7 @@ class LatVarPredModel(pl.LightningModule):
                                    └--> dec() --> x_{t+1}
         '''
         x, _ = batch
+        device = x.get_device()
 
         ###############
         #  Input x:s
@@ -331,27 +402,72 @@ class LatVarPredModel(pl.LightningModule):
 
         h, h_oracle = h.chunk(2)
 
-        ##########################
-        #  Latent distributions
-        ##########################
-        z_mu, z_std = self.qzh_prior(h)
         z_mu_oracle, z_std_oracle = self.qzh_oracle(h_oracle)
+
+        ################
+        #  Multimodal
+        ################
+        y = torch.eye(self.y_dim, device=device)  # (K, K)
+
+        z_mus = []
+        z_stds = []
+        kl_dists = []
+        B = h.shape[0]
+        for mixture_idx in range(self.y_dim):
+
+            y_ = y[:, mixture_idx:mixture_idx + 1]  # (K, 1)
+            y_ = y_.T  # (1, K)
+            y_ = torch.tile(y_, (B, 1))  # Y matrix (B, K)
+
+            hy = torch.cat([h, y_], dim=1)  # (B, E+K)
+
+            ##########################
+            #  Latent distributions
+            ##########################
+            z_mu, z_std = self.qzh_prior(hy)
+            z_mus.append(z_mu)
+            z_stds.append(z_std)
+
+            # Distance between mode distribution and oracle distribution
+            kl = self.kl_divergence(z_mu_oracle, z_std_oracle, z_mu, z_std)
+            kl_dists.append(kl)
 
         ###############################
         #  Distribution optimization
         ###############################
 
+        # 1: Find Make closest mode and make similar to oracle
+        kl_dists = torch.stack(kl_dists)  # (K, B, D)
+        kl_dists = torch.transpose(kl_dists, 1, 0)  # (B, K, D)
+        kl_dists = kl_dists.sum(dim=-1)  # (B, K)
+
+        k = torch.argmin(kl_dists, dim=1)
+        k_mask = F.one_hot(k, self.y_dim).bool()
+        kl_mix = torch.masked_select(kl_dists, k_mask)  # (B)
+
+        # 2: Make oracle cover prior
         # Optimize q(x) = N_{t}(z) to cover p(x) = N_{t+1}(z)
-        kl = self.kl_divergence(z_mu_oracle, z_std_oracle, z_mu, z_std)
-        kl = kl.sum(dim=-1)  # (N)
+        z_mu_prior = torch.zeros_like(z_mu_oracle)
+        z_std_prior = torch.ones_like(z_std_oracle)
+        kl_oracle = self.kl_divergence(z_mu_prior, z_std_prior, z_mu_oracle,
+                                       z_std_oracle)
+        kl_oracle = kl_oracle.sum(dim=-1)  # (B)
+
+        # 3. Make modes distinct
+        # Convert 'mixture ordered' list --> 'sample ordered' tensor
+        z_mus = torch.stack(z_mus)  # (K, B, H, W)
+        z_mus = torch.transpose(z_mus, 1, 0)  # (B, K, H, W)
+        dist_mix = torch.cdist(z_mus, z_mus)
+        # Compute mean distance for non-diagonal elements
+        dist_mix = dist_mix.sum(dim=(1, 2)) / (self.y_dim**2 - self.y_dim)
 
         # Optimize q(x_1) = q(x_2)
-        z_mu_1, z_mu_2 = z_mu.chunk(2)
-        z_std_1, z_std_2 = z_std.chunk(2)
-        kl_1 = self.kl_divergence(z_mu_1, z_std_1, z_mu_2, z_std_2)
-        kl_2 = self.kl_divergence(z_mu_2, z_std_2, z_mu_1, z_std_1)
-        js = 0.5 * kl_1 + 0.5 * kl_2
-        js = js.sum(dim=-1)  # (N)
+        # z_mu_1, z_mu_2 = z_mu.chunk(2)
+        # z_std_1, z_std_2 = z_std.chunk(2)
+        # kl_1 = self.kl_divergence(z_mu_1, z_std_1, z_mu_2, z_std_2)
+        # kl_2 = self.kl_divergence(z_mu_2, z_std_2, z_mu_1, z_std_1)
+        # js = 0.5 * kl_1 + 0.5 * kl_2
+        # js = js.sum(dim=-1)  # (N)
 
         ################
         #  Prediction
@@ -361,41 +477,41 @@ class LatVarPredModel(pl.LightningModule):
         z_oracle = q.rsample()
         h_lat = torch.cat((h, z_oracle), dim=-1)
 
-        out_feat = self.decoder(h_lat)
+        x_hat = self.decoder(h_lat)
         # 'road' and 'intensity' output head pair
-        road_pred = self.road_head(out_feat)
-        x_hat = road_pred
+        # road_pred = self.road_head(out_feat)
+        # x_hat = road_pred
 
-        # recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
-        recon_road_loss = self.binary_cross_entropy(
-            x_hat[:, 0:1],
-            x_target[:, 0:1],
-            m_target[:, 0:1],
-        )
+        recon_loss = -self.binary_cross_entropy(x_hat, x_target, m_target)
 
-        elbo = -recon_road_loss
+        loss = recon_loss
 
-        elbo += self.beta * kl
-        elbo = elbo.mean()  # + js.mean()
+        loss += self.beta_oracle * kl_oracle
+        loss += self.beta_mix * kl_mix
+        # loss -= dist_mix
+        loss = loss.mean()  # + js.mean()
 
-        # Latent variable metrics
-        z_mu_abs = torch.abs(z_mu.detach())
+        # Variable metrics
+        h_abs = torch.abs(h.detach())
+        # z_mu_abs = torch.abs(z_mu.detach())
         z_mu_oracle_abs = torch.abs(z_mu_oracle.detach())
-        z_std_abs = torch.abs(z_std.detach())
+        # z_std_abs = torch.abs(z_std.detach())
         z_std_oracle_abs = torch.abs(z_std_oracle.detach())
 
         self.log_dict({
-            'train_elbo': elbo,
-            'train_kl': kl.mean(),
-            'train_js': js.mean(),
-            'train_recon_road': recon_road_loss.mean(),
-            'z_mu_abs': z_mu_abs.mean(),
+            'train_loss': loss,
+            'train_kl_dists': kl_dists.mean(),
+            'train_kl_oracle': kl_oracle.mean(),
+            'train_dist_mix': dist_mix.mean(),
+            'train_recon_road': recon_loss.mean(),
+            # 'z_mu_abs': z_mu_abs.mean(),
+            'train_h_abs': h_abs.mean(),
             'z_mu_oracle_abs': z_mu_oracle_abs.mean(),
-            'z_std_abs': z_std_abs.mean(),
+            # 'z_std_abs': z_std_abs.mean(),
             'z_std_oracle_abs': z_std_oracle_abs.mean(),
         })
 
-        return elbo
+        return loss
 
     def validation_step(self, batch, batch_idx):
 
@@ -412,11 +528,49 @@ class LatVarPredModel(pl.LightningModule):
 
         x_in, x_oracle, x_target, m_target = self.unpack_sample(x)
 
-        x_hat = self.forward(x_in)
+        ################
+        #  Validation
+        ################
+        x_hats, _, z_mus, z_stds = self.forward(x_in)
 
-        recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
+        # (B, 1, H, W) --> (B, K, 1, H, W)
+        x_target_mix = x_target.clone()
+        x_target_mix = x_target_mix.unsqueeze_(1)
+        x_target_mix = torch.tile(x_target_mix, (1, self.y_dim, 1, 1, 1))
+        m_target_mix = m_target.clone()
+        m_target_mix = m_target_mix.unsqueeze_(1)
+        m_target_mix = torch.tile(m_target_mix, (1, self.y_dim, 1, 1, 1))
 
-        self.log('val_recon', recon_loss.mean())
+        # Find smallest reconstruction loss among all modes
+        recon_loss = -self.binary_cross_entropy(x_hats, x_target_mix,
+                                                m_target_mix)
+        recon_loss_min, _ = torch.min(recon_loss, dim=1)
+        k = torch.argmin(recon_loss, dim=1)
+
+        self.log('val_recon', recon_loss_min.mean())
+
+        self.logger.experiment.add_histogram('z_mu', z_mus, self.current_epoch)
+        self.logger.experiment.add_histogram('z_std', z_stds,
+                                             self.current_epoch)
+
+        ############################
+        #  Validation with oracle
+        ############################
+        x_oracle_hats, h, z_mus_oracle, z_stds_oracle = self.forward_oracle(
+            x_in, x_oracle)
+        recon_loss = -self.binary_cross_entropy(x_oracle_hats, x_target,
+                                                m_target)
+        self.log('val_recon_oracle', recon_loss.mean())
+
+        self.logger.experiment.add_histogram('k',
+                                             k,
+                                             self.current_epoch,
+                                             bins=self.y_dim)
+        self.logger.experiment.add_histogram('h', h, self.current_epoch)
+        self.logger.experiment.add_histogram('z_mu_oracle', z_mus_oracle,
+                                             self.current_epoch)
+        self.logger.experiment.add_histogram('z_std_oracle', z_stds_oracle,
+                                             self.current_epoch)
 
         #        x, _ = batch
         #        x_prob = self.unnormalize(x)
@@ -435,18 +589,18 @@ class LatVarPredModel(pl.LightningModule):
             #####################################
             #  Visualize input and predictions
             #####################################
-            x_hats = []
-            for _ in range(10):
-                x_hat = self.forward(x_in)
-                x_hats.append(x_hat)
+            x_hats_ = []
+            for mixture_idx in range(self.y_dim):
+                x_hats_.append(x_hats[:, mixture_idx])
+            x_hats = x_hats_
 
             # Avoid overshooting batch size
             view_num = 1
             num_viz_samples = min(x_in.shape[0],
                                   self.num_viz_samples) * view_num
-            rows = 1 + 10
+            rows = 1 + self.y_dim
 
-            x_in_viz = x_in
+            x_in_viz = x_in.clone()
             x_in_viz[:, 0] = x_in_viz[:, 0] / 2 + 0.5
             viz = self.viz_mixture_preds(x_hats, x_in_viz, num_viz_samples)
 
@@ -469,6 +623,47 @@ class LatVarPredModel(pl.LightningModule):
                     plt.text(h_pos, v_pos, msg, color='white')
 
             self.logger.experiment.add_figure('viz',
+                                              plt.gcf(),
+                                              global_step=self.current_epoch)
+
+            #####################################
+            #  Visualize oracle predictions
+            #####################################
+            x_oracle_hats_ = []
+            for _ in range(1):
+                x_oracle_hats_.append(x_oracle_hats)
+            x_oracle_hats = x_oracle_hats_
+
+            # Avoid overshooting batch size
+            view_num = 1
+            num_viz_samples = min(x_in.shape[0],
+                                  self.num_viz_samples) * view_num
+            rows = 2
+
+            x_in_viz = x_in.clone()
+            x_in_viz[:, 0] = x_in_viz[:, 0] / 2 + 0.5
+            viz = self.viz_mixture_preds(x_oracle_hats, x_in_viz,
+                                         num_viz_samples)
+
+            # Make columns be ordered by 'present / future' pairs
+            res = x_in.shape[-2]
+            num_pairs = num_viz_samples // 2
+            viz = self.reorganize_viz_pairs(viz, num_pairs, res)
+
+            size_per_fig = 4
+            plt.figure(figsize=((num_viz_samples * size_per_fig,
+                                 rows * size_per_fig)))
+            plt.imshow(viz, vmin=0, vmax=1)
+            plt.tight_layout()
+
+            # for sample_idx in range(num_viz_samples):
+            #     for k in range(10):
+            #         msg = str(k)
+            #         h_pos = sample_idx * self.in_size * 2
+            #         v_pos = (k + 1) * self.in_size + 3
+            #         plt.text(h_pos, v_pos, msg, color='white')
+
+            self.logger.experiment.add_figure('viz_oracle',
                                               plt.gcf(),
                                               global_step=self.current_epoch)
 
@@ -551,8 +746,10 @@ class LatVarPredModel(pl.LightningModule):
             type=int,
             default=256,
             help='Inference model output dim (before linear model: mu, std')
+        parser.add_argument('--y_dim', type=int, default=10)
         parser.add_argument('--lr', type=float, default=1e-3)
-        parser.add_argument('--beta', type=float, default=1., help='For KL')
+        parser.add_argument('--beta_oracle', type=float, default=1.)
+        parser.add_argument('--beta_mix', type=float, default=1.)
         parser.add_argument('--weight_decay', type=float, default=1e-5)
         parser.add_argument('--encoder_conv_chs',
                             type=list,
@@ -580,7 +777,8 @@ if __name__ == '__main__':
     from datamodules.bev_datamodule import BEVDataModule
 
     parser = ArgumentParser()
-    parser.add_argument('--data_dir', type=str)
+    parser.add_argument('--train_data_dir', type=str)
+    parser.add_argument('--val_data_dir', type=str)
     parser.add_argument('--num_workers', type=int, default=0)
     # Add program level args
     # Add model speficic args
@@ -594,7 +792,8 @@ if __name__ == '__main__':
     trainer = pl.Trainer.from_argparse_args(args)
 
     bev = BEVDataModule(
-        data_dir=args.data_dir,
+        train_data_dir=args.train_data_dir,
+        val_data_dir=args.val_data_dir,
         batch_size=args.batch_size,
         do_rotation=True,
         do_extrapolation=False,
