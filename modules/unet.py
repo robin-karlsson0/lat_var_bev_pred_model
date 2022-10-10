@@ -77,7 +77,7 @@ class UnetEncoder(pl.LightningModule):
         self.fc_encoder = nn.Sequential(
             nn.Linear(4 * ch_prev, ch_prev, bias=False),
             nn.BatchNorm1d(ch_prev),
-            nn.Tanh(),
+            nn.LeakyReLU(),
         )
         # -->
 
