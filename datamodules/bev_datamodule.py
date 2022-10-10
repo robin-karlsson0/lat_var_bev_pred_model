@@ -249,7 +249,8 @@ class BEVDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "./",
+        train_data_dir: str = "./",
+        val_data_dir: str = "./",
         batch_size: int = 128,
         num_workers: int = 0,
         do_rotation: bool = False,
@@ -260,13 +261,14 @@ class BEVDataModule(pl.LightningDataModule):
         use_preproc=False,
     ):
         super().__init__()
-        self.data_dir = data_dir
+        self.train_data_dir = train_data_dir
+        self.val_data_dir = val_data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
 
         if use_preproc:
             self.bev_dataset_train = PreprocBEVDataset(
-                self.data_dir,
+                self.train_data_dir,
                 do_rotation=do_rotation,
                 do_extrapolation=do_extrapolation,
                 do_masking=do_masking,
@@ -274,7 +276,7 @@ class BEVDataModule(pl.LightningDataModule):
                 mask_p_max=mask_p_max,
             )
             self.bev_dataset_val = PreprocBEVDataset(
-                self.data_dir,
+                self.val_data_dir,
                 do_shuffle=True,
                 do_extrapolation=do_extrapolation,
                 do_masking=do_masking,
@@ -283,7 +285,7 @@ class BEVDataModule(pl.LightningDataModule):
             )
         else:
             self.bev_dataset_train = BEVDataset(
-                self.data_dir,
+                self.train_data_dir,
                 do_rotation=do_rotation,
                 do_extrapolation=do_extrapolation,
                 do_masking=do_masking,
@@ -291,7 +293,7 @@ class BEVDataModule(pl.LightningDataModule):
                 mask_p_max=mask_p_max,
             )
             self.bev_dataset_val = BEVDataset(
-                self.data_dir,
+                self.val_data_dir,
                 do_shuffle=True,
                 do_extrapolation=do_extrapolation,
                 do_masking=do_masking,
