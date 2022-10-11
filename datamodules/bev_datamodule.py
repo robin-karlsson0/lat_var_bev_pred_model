@@ -8,8 +8,8 @@ import random
 import numpy as np
 import pytorch_lightning as pl
 import torch
-from scipy import ndimage
-from scipy.spatial import distance
+# from scipy import ndimage
+# from scipy.spatial import distance
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -154,54 +154,55 @@ class BEVDataset(Dataset):
         except IOError as error:
             print(error)
 
-    @staticmethod
-    def distance_field(mat: np.array,
-                       dist_from_pos: bool,
-                       metric: str = 'chebyshev'):
-        '''
-        Assumes mat has a single semantic class with probablistic measurements
-        p(x_{i,j}=True).
-        '''
-        if dist_from_pos:
-            input = mat > 0.5
-        else:
-            input = mat < 0.5
-        not_input = ~input
 
-        input_inner = ndimage.binary_erosion(input)
-        contour = input - input_inner.astype(int)
-
-        dist_field = contour.astype(int)
-
-        dist_field[not_input] = distance.cdist(
-            np.argwhere(contour), np.argwhere(not_input), metric).min(0) + 1
-
-        return dist_field
-
-    def gen_pseudo_bev(self, bev, metric: str = 'sqeuclidean'):
-
-        pos_dist_field = self.distance_field(bev, True, metric)
-        neg_dist_field = self.distance_field(bev, False, metric)
-
-        pseudo_bev = copy.deepcopy(bev)
-
-        for i in range(128):
-            for j in range(128):
-
-                obs = bev[i, j]
-                if obs > 0.5 or obs < 0.5:
-                    continue
-
-                pos_dist = pos_dist_field[i, j]
-                neg_dist = neg_dist_field[i, j]
-
-                if pos_dist < neg_dist:
-                    pseudo_obs = 1.
-                else:
-                    pseudo_obs = 0.
-                pseudo_bev[i, j] = pseudo_obs
-
-        return pseudo_bev, pos_dist_field, neg_dist_field
+#    @staticmethod
+#    def distance_field(mat: np.array,
+#                       dist_from_pos: bool,
+#                       metric: str = 'chebyshev'):
+#        '''
+#        Assumes mat has a single semantic class with probablistic measurements
+#        p(x_{i,j}=True).
+#        '''
+#        if dist_from_pos:
+#            input = mat > 0.5
+#        else:
+#            input = mat < 0.5
+#        not_input = ~input
+#
+#        input_inner = ndimage.binary_erosion(input)
+#        contour = input - input_inner.astype(int)
+#
+#        dist_field = contour.astype(int)
+#
+#        dist_field[not_input] = distance.cdist(
+#            np.argwhere(contour), np.argwhere(not_input), metric).min(0) + 1
+#
+#        return dist_field
+#
+#    def gen_pseudo_bev(self, bev, metric: str = 'sqeuclidean'):
+#
+#        pos_dist_field = self.distance_field(bev, True, metric)
+#        neg_dist_field = self.distance_field(bev, False, metric)
+#
+#        pseudo_bev = copy.deepcopy(bev)
+#
+#        for i in range(128):
+#            for j in range(128):
+#
+#                obs = bev[i, j]
+#                if obs > 0.5 or obs < 0.5:
+#                    continue
+#
+#                pos_dist = pos_dist_field[i, j]
+#                neg_dist = neg_dist_field[i, j]
+#
+#                if pos_dist < neg_dist:
+#                    pseudo_obs = 1.
+#                else:
+#                    pseudo_obs = 0.
+#                pseudo_bev[i, j] = pseudo_obs
+#
+#        return pseudo_bev, pos_dist_field, neg_dist_field
 
 
 class PreprocBEVDataset(BEVDataset):
@@ -253,6 +254,7 @@ class BEVDataModule(pl.LightningDataModule):
         val_data_dir: str = "./",
         batch_size: int = 128,
         num_workers: int = 0,
+        persistent_workers=True,
         do_rotation: bool = False,
         do_extrapolation=False,
         do_masking=False,
@@ -265,6 +267,7 @@ class BEVDataModule(pl.LightningDataModule):
         self.val_data_dir = val_data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.persistent_workers = persistent_workers
 
         if use_preproc:
             self.bev_dataset_train = PreprocBEVDataset(
@@ -306,6 +309,7 @@ class BEVDataModule(pl.LightningDataModule):
             self.bev_dataset_train,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers,
             shuffle=shuffle,
         )
 
@@ -314,6 +318,7 @@ class BEVDataModule(pl.LightningDataModule):
             self.bev_dataset_val,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers,
             shuffle=shuffle,
         )
 
@@ -322,6 +327,7 @@ class BEVDataModule(pl.LightningDataModule):
             self.bev_dataset_val,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=self.persistent_workers,
             shuffle=shuffle,
         )
 
