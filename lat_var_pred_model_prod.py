@@ -2,11 +2,9 @@
 
 # mpl.use('agg')  # Must be before pyplot import to avoid memory leak
 # import matplotlib.pyplot as plt
-import numpy as np
 # import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 
 # from modules.large_mnist_decoder import LargeMNISTExpDecoder
 # from modules.large_mnist_encoder import LargeMNISTExpEncoder
@@ -27,8 +25,6 @@ class LatVarPredModelProd(nn.Module):
         lat_dim,
         z_hidden_dim,
         y_dim,
-        encoder_conv_chs,
-        decoder_conv_chs,
         enc_str,
         dec_str,
         sample_type,
@@ -43,8 +39,6 @@ class LatVarPredModelProd(nn.Module):
         self.lat_dim = lat_dim
         self.z_hidden_dim = z_hidden_dim
         self.y_dim = y_dim
-        self.encoder_conv_chs = encoder_conv_chs
-        self.decoder_conv_chs = decoder_conv_chs
 
         self.sample_type = sample_type
 
@@ -165,7 +159,7 @@ class LatVarPredModelProd(nn.Module):
         B = h.shape[0]
         z_mus = []
         z_stds = []
-        for mixture_idx in range(self.y_dim):
+        for mixture_idx in range(1):
 
             y_ = y[:, mixture_idx:mixture_idx + 1]  # (K, 1)
             y_ = y_.T  # (1, K)
@@ -211,49 +205,50 @@ class LatVarPredModelProd(nn.Module):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group('LatVarPredModelProd')
-        parser.add_argument('--checkpoint_path', type=str)
-        parser.add_argument('--in_ch', type=int, default=2)
-        parser.add_argument('--in_size', type=int, default=128)
+        parser.add_argument('--in_ch', type=int, default=1)
+        parser.add_argument('--in_size', type=int, default=256)
         parser.add_argument('--out_ch', type=int, default=1)
         parser.add_argument('--enc_dim',
                             type=int,
-                            default=256,
+                            default=128,
                             help='Encoder output dim')
-        parser.add_argument('--lat_dim', type=int, default=8)
+        parser.add_argument('--lat_dim', type=int, default=32)
         parser.add_argument(
             '--z_hidden_dim',
             type=int,
             default=256,
             help='Inference model output dim (before linear model: mu, std')
         parser.add_argument('--y_dim', type=int, default=10)
-        parser.add_argument('--encoder_conv_chs',
-                            type=list,
-                            default=[32, 64, 128, 256, 512, 128])
-        parser.add_argument('--decoder_conv_chs',
-                            type=list,
-                            default=[64, 32, 16, 8, 4])
-        parser.add_argument('--enc_str',
-                            default='2x32,2x64,2x128,2x256,2x256,2x512,2x256')
-        #                             128   64    32    16     8     4     4
+        parser.add_argument(
+            '--enc_str',
+            default='2x16,2x32,2x64,2x128,2x256,2x256,2x512,2x128')
         parser.add_argument('--dec_str',
-                            default='2x512,2x256,2x256,2x128,2x64,2x32')
-        #                                4     8    16    32   64  128
+                            default='2x512,2x256,2x256,2x128,2x64,2x32,2x16')
         parser.add_argument('--sample_type', type=str, default='road')
         # parser.add_argument('', type=int, default=)
         return parent_parser
 
 
 if __name__ == '__main__':
+    # import os
+    import pickle
     from argparse import ArgumentParser
 
     import matplotlib.pyplot as plt
 
+    # import onnx
+    # import onnxruntime as ort
     from datamodules.bev_datamodule import BEVDataModule
+    from utils.lat_var_pred_aux import integrate_obs_and_lat_pred
 
     parser = ArgumentParser()
     # Add program level args
+    parser.add_argument('--checkpoint_path', type=str)
+    # parser.add_argument('--make_onnx_model', action="store_true")
+    parser.add_argument('--use_oracle_sample', action="store_true")
     parser.add_argument('--data_dir', type=str)
     parser.add_argument('--num_samples', type=int, default=5)
+    parser.add_argument('--batch_size', type=int, default=1)
     # Add model speficic args
     parser = LatVarPredModelProd.add_model_specific_args(parser)
     args = parser.parse_args()
@@ -261,24 +256,53 @@ if __name__ == '__main__':
     dict_args = vars(args)
     model = LatVarPredModelProd(**dict_args)
 
+    with open('lat_var_pred_model_config.pkl', 'wb') as f:
+        pickle.dump(dict_args, f)
+
     checkpoint = torch.load(args.checkpoint_path)
     model.load_state_dict(checkpoint['state_dict'])
 
     model.cuda()
     model.eval()
 
+    #######################
+    #  Create ONNX model
+    #######################
+    # onnx_filename = f'lat_var_pred_model_bs{args.batch_size}.onnx'
+    # if args.make_onnx_model:
+    #     x = torch.randn(args.batch_size, 1, 256, 256, requires_grad=True)
+    #     torch.onnx.export(
+    #         model,
+    #         x,
+    #         onnx_filename,
+    #         export_params=True,
+    #         do_constant_folding=True,
+    #         input_names=['input'],
+    #         output_names=['output'],
+    #     )
+    # if os.path.isfile(onnx_filename) is not True:
+    #     raise IOError(f'ONNX model does not exist ({onnx_filename})')
+    # # Check that the model is well formed
+    # onnx_model = onnx.load(onnx_filename)
+    # onnx.checker.check_model(onnx_model)
+
     bev = BEVDataModule(
         train_data_dir=args.data_dir,
         val_data_dir=args.data_dir,
-        batch_size=1,
+        batch_size=args.batch_size,
         do_rotation=True,
         do_extrapolation=False,
         do_masking=False,
         use_preproc=True,
         num_workers=1,
     )
-
     dataloader = bev.val_dataloader(shuffle=True)
+
+    #####################
+    #  Test ONNX model
+    #####################
+    # ort_session = ort.InferenceSession(onnx_filename,
+    #                                    providers=['CUDAExecutionProvider'])
 
     for idx, batch in enumerate(dataloader):
 
@@ -287,16 +311,28 @@ if __name__ == '__main__':
         x, _ = batch
 
         x_in, x_oracle, x_target, m_target = model.unpack_sample_road(x)
+        if args.use_oracle_sample:
+            x_in = x_oracle
         # Remove future sample
-        x_in = x_in[0:1]
+        x_in = x_in[0:args.batch_size]
         x_in = x_in.cuda()
+        m_target = m_target[0:args.batch_size, 0]
+        # x_oracle = x_oracle[0:1]
+        # x_oracle = x_oracle.cuda()
 
         x_hats = []
         for _ in range(args.num_samples):
+
+            # outputs = ort_session.run(None, {'input': x_in.numpy()})
+            # x_hat = outputs[0]  # (B, K, 1, H, W)
+            # x_hat = x_hat[0:1]
+
             x_hat, _, _, _ = model.forward(x_in)
             x_hats.append(x_hat)
 
         x_in = x_in.cpu().numpy()
+        m_target = m_target.cpu().numpy()
+        # x_oracle = x_oracle.cpu().numpy()
         x_hats = [x_hat.detach().cpu().numpy() for x_hat in x_hats]
 
         num_rows = args.num_samples
@@ -304,12 +340,20 @@ if __name__ == '__main__':
 
         plt.subplot(num_rows, num_cols, 1)
         plt.imshow(x_in[0, 0])
+        # plt.imshow(x_oracle[0, 0])
 
         for sampling_idx in range(args.num_samples):
             for idx in range(1, model.y_dim):
                 plt.subplot(num_rows, num_cols,
                             idx + 1 + sampling_idx * num_cols)
-                plt.imshow(x_hats[sampling_idx][0, idx, 0])
+                x_pred = x_hats[sampling_idx][0, idx, 0]
+
+                x_pred = integrate_obs_and_lat_pred(x_in[0, 0],
+                                                    x_pred,
+                                                    m_target[0],
+                                                    threshold=0.4999,
+                                                    is_np=True)
+                plt.imshow(x_pred)
 
         plt.tight_layout()
         plt.show()
