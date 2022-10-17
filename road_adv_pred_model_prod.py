@@ -221,7 +221,6 @@ if __name__ == '__main__':
     # Add program level args
     parser.add_argument('--dict_path', type=str)
     parser.add_argument('--checkpoint_path', type=str)
-    parser.add_argument('--use_oracle_sample', action="store_true")
     parser.add_argument('--data_dir', type=str)
     parser.add_argument('--save_dir', type=str)
     parser.add_argument('--num_samples', type=int, default=5)
@@ -258,20 +257,19 @@ if __name__ == '__main__':
 
     for idx, batch in enumerate(dataloader):
 
-        print(f'idx {idx}')
-
         x, _ = batch
 
         x_in, x_oracle, x_target, m_target = model.unpack_sample(x)
-        if args.use_oracle_sample:
-            x_in = x_oracle
         # Remove future sample
         x_in = x_in[0:args.batch_size]
-        x_in = x_in.cuda()
+        x_oracle = x_oracle[0:args.batch_size]
         m_target = m_target[0:args.batch_size]
+
+        x_oracle = x_oracle.cuda()
         m_target = m_target.cuda()
 
-        x_pred = model.forward(x_in, m_target)
+        x_pred = model.forward(x_oracle, m_target)
+        x_pred = x_pred.cpu()
 
         if bev_idx >= 1000:
             bev_idx = 0
