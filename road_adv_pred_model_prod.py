@@ -289,21 +289,21 @@ if __name__ == '__main__':
         x_in = x_in.cpu().numpy()
         x_pred = x_pred.cpu().numpy()
 
-        num_rows = 4
-        num_cols = args.num_samples
+        num_rows = args.batch_size
+        num_cols = 4
 
         size_per_fig = 6
         _ = plt.figure(figsize=(size_per_fig * num_cols,
                                 size_per_fig * num_rows))
 
-        for idx in range(args.num_samples):
-            plt.subplot(num_rows, num_cols, idx + 1 + 0 * num_cols)
+        for idx in range(args.batch_size):
+            plt.subplot(num_rows, num_cols, 1 + 0 + idx * num_cols)
             plt.imshow(x_in[idx, 0])
-            plt.subplot(num_rows, num_cols, idx + 1 + 1 * num_cols)
+            plt.subplot(num_rows, num_cols, 1 + 1 + idx * num_cols)
             plt.imshow(x_in[idx, 1])
-            plt.subplot(num_rows, num_cols, idx + 1 + 2 * num_cols)
+            plt.subplot(num_rows, num_cols, 1 + 2 + idx * num_cols)
             plt.imshow(x_pred[idx, 0])
-            plt.subplot(num_rows, num_cols, idx + 1 + 3 * num_cols)
+            plt.subplot(num_rows, num_cols, 1 + 3 + idx * num_cols)
             plt.imshow(x_pred[idx, 1])
 
         plt.tight_layout()
