@@ -219,8 +219,8 @@ if __name__ == '__main__':
     import pickle
     from argparse import ArgumentParser
 
-    import matplotlib as mpl
-    mpl.use('agg')  # Must be before pyplot import
+    # import matplotlib as mpl
+    # mpl.use('agg')  # Must be before pyplot import
     import matplotlib.pyplot as plt
 
     from datamodules.bev_datamodule import (BEVDataModule,
@@ -235,6 +235,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_dir', type=str)
     parser.add_argument('--num_samples', type=int, default=5)
     parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--prob_conditioning', type=float, default=0)
     # Add model speficic args
     parser = RoadAdvPredModelProd.add_model_specific_args(parser)
     args = parser.parse_args()
@@ -294,12 +295,16 @@ if __name__ == '__main__':
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
 
-        x = torch.concat([x_in, x_pred, x_traj], dim=1)
-
         x_in[:, 1:2] = 2 * x_in[:, 1:2] - 1
         x_in[:,
              1:2] = model.make_nonroad_intensity_zero(x_in[:, 1:2], x_in[:,
                                                                          0:1])
+
+        if torch.rand(1).item() < args.prob_conditioning:
+            mask = x_traj == 1
+            x_in[:, 0:1][mask] = 1
+
+        x = torch.concat([x_in, x_pred, x_traj], dim=1)
 
         write_compressed_pickle(x, filename, output_path)
 
