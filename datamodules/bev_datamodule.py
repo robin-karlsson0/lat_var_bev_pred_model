@@ -1,10 +1,10 @@
-import copy
 import glob
 import gzip
 import os
 import pickle
 import random
 
+import cv2
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -59,6 +59,17 @@ class BEVDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
+        '''
+        Returns
+            Tensor (7,256,256)
+                [0]: road_present
+                [1]: intensity_present
+                [2]: road_future
+                [3]: intensity_future
+                [4]: road_full
+                [5]: intensity_full
+                [6]: traj_label
+        '''
         while True:
             sample_path = self.sample_paths[idx]
             sample_path = os.path.join(self.abs_root_path, sample_path)
@@ -89,33 +100,30 @@ class BEVDataset(Dataset):
         intensity_future = intensity_future.astype(np.float32)
         intensity_full = intensity_full.astype(np.float32)
 
-        intensity_present = self.road_marking_transform(intensity_present)
-        intensity_future = self.road_marking_transform(intensity_future)
-        intensity_full = self.road_marking_transform(intensity_full)
+        # Make non-road intensity 0
+        intensity_present = self.make_nonroad_intensity_zero(
+            intensity_present, road_present)
+        intensity_future = self.make_nonroad_intensity_zero(
+            intensity_future, road_future)
+        intensity_full = self.make_nonroad_intensity_zero(
+            intensity_full, road_full)
 
-        if self.do_extrapolation:
-            pseudo_road_full, _, _ = self.gen_pseudo_bev(road_full)
-
-            if self.do_masking:
-                p = np.random.random()
-                mask_prob = self.mask_p_max - (1. - self.mask_p_min) * p
-                h, w = pseudo_road_full.shape
-                mask = np.random.rand(h, w) < mask_prob
-                pseudo_road_full[mask] = 0.5
-
-            mask = ~(pseudo_road_full == 0.5)
-            pseudo_road_full[mask] = pseudo_road_full[mask]
-
-            mask = road_full == 0.5
-            road_full[mask] = pseudo_road_full[mask]
+        #################################
+        #  Make dense trajectory label
+        #################################
+        poses = sample['poses_full']
+        # Poses: (N, 2) matrix with (i, j) coordinates
+        poses = poses[:, 0:2]
+        poses[:, 1] = 255 - poses[:, 1]
+        # Convert to point list
+        n = poses.shape[0]
+        traj = [(int(poses[idx, 0]), int(poses[idx, 1])) for idx in range(n)]
+        traj = self.remove_duplicate_pnts(traj)
+        traj_label = self.draw_trajectory(traj, 256, 256, traj_width=1)
 
         input_tensor = np.stack([
-            road_present,
-            intensity_present,
-            road_future,
-            intensity_future,
-            road_full,
-            intensity_full,
+            road_present, intensity_present, road_future, intensity_future,
+            road_full, intensity_full, traj_label
         ])
         input_tensor = torch.tensor(input_tensor, dtype=torch.float)
 
@@ -125,6 +133,13 @@ class BEVDataset(Dataset):
             input_tensor = torch.rot90(input_tensor, k, (-2, -1))
 
         return input_tensor, torch.tensor([0])
+
+    @staticmethod
+    def make_nonroad_intensity_zero(intensity, road, thres=0.5):
+        # Make non-road intensity 0
+        is_road_mask = (road > thres)
+        intensity[~is_road_mask] = 0.
+        return intensity
 
     def get_random_sample_idx(self):
         return np.random.randint(0, self.num_samples)
@@ -140,6 +155,35 @@ class BEVDataset(Dataset):
         intensity_map[intensity_map > 1.] = 1.
         return intensity_map
 
+    def draw_trajectory(self,
+                        traj: np.ndarray,
+                        I: int,
+                        J: int,
+                        traj_width: int = 5):
+        '''
+        Args:
+            traj: (N,2) matrix with (i, j) coordinates
+        '''
+        label = np.zeros((I, J))
+        for idx in range(len(traj) - 1):
+
+            pnt_0 = traj[idx]
+            pnt_1 = traj[idx + 1]
+
+            # pnt_0 = poses[idx].astype(int)
+            # pnt_1 = poses[idx + 1].astype(int)
+            # pnt_0 = tuple(pnt_0)
+            # pnt_1 = tuple(pnt_1)
+
+            cv2.line(label, pnt_0, pnt_1, 1, traj_width)
+
+        return label
+
+    @staticmethod
+    def remove_duplicate_pnts(sequence):
+        seen = set()
+        return [x for x in sequence if not (x in seen or seen.add(x))]
+
     @staticmethod
     def sigmoid(z):
         return 1 / (1 + np.exp(-z))
@@ -153,56 +197,6 @@ class BEVDataset(Dataset):
                 return obj
         except IOError as error:
             print(error)
-
-
-#    @staticmethod
-#    def distance_field(mat: np.array,
-#                       dist_from_pos: bool,
-#                       metric: str = 'chebyshev'):
-#        '''
-#        Assumes mat has a single semantic class with probablistic measurements
-#        p(x_{i,j}=True).
-#        '''
-#        if dist_from_pos:
-#            input = mat > 0.5
-#        else:
-#            input = mat < 0.5
-#        not_input = ~input
-#
-#        input_inner = ndimage.binary_erosion(input)
-#        contour = input - input_inner.astype(int)
-#
-#        dist_field = contour.astype(int)
-#
-#        dist_field[not_input] = distance.cdist(
-#            np.argwhere(contour), np.argwhere(not_input), metric).min(0) + 1
-#
-#        return dist_field
-#
-#    def gen_pseudo_bev(self, bev, metric: str = 'sqeuclidean'):
-#
-#        pos_dist_field = self.distance_field(bev, True, metric)
-#        neg_dist_field = self.distance_field(bev, False, metric)
-#
-#        pseudo_bev = copy.deepcopy(bev)
-#
-#        for i in range(128):
-#            for j in range(128):
-#
-#                obs = bev[i, j]
-#                if obs > 0.5 or obs < 0.5:
-#                    continue
-#
-#                pos_dist = pos_dist_field[i, j]
-#                neg_dist = neg_dist_field[i, j]
-#
-#                if pos_dist < neg_dist:
-#                    pseudo_obs = 1.
-#                else:
-#                    pseudo_obs = 0.
-#                pseudo_bev[i, j] = pseudo_obs
-#
-#        return pseudo_bev, pos_dist_field, neg_dist_field
 
 
 class PreprocBEVDataset(BEVDataset):
@@ -253,7 +247,7 @@ class BEVDataModule(pl.LightningDataModule):
         train_data_dir: str = "./",
         val_data_dir: str = "./",
         batch_size: int = 128,
-        num_workers: int = 0,
+        num_workers: int = 1,
         persistent_workers=True,
         do_rotation: bool = False,
         do_extrapolation=False,
@@ -358,7 +352,8 @@ if __name__ == '__main__':
     batch_size = 1
 
     bev = BEVDataModule(
-        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_aug_gt_3_rev',
+        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_up_seq_07_new_aug',
+        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_up_seq_07_new_aug',
         batch_size,
         do_rotation=False)
     dataloader = bev.train_dataloader(shuffle=False)
@@ -367,7 +362,7 @@ if __name__ == '__main__':
 
     bev_idx = 0
     subdir_idx = 0
-    savedir = 'bev_kitti360_256px_aug_gt_3_rev_preproc'
+    savedir = 'bev_kitti360_256px_up_seq_07_new_aug_preproc'
 
     for idx, batch in enumerate(dataloader):
 

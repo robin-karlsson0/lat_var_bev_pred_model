@@ -72,6 +72,7 @@ class RoadAdvPredModelProd(nn.Module):
         x_present = x[:, 0:2]
         x_future = x[:, 2:4]
         x_full = x[:, 4:6]
+        x_traj = x[:, 6:7]
 
         x_target = x_full.clone()
 
@@ -102,13 +103,14 @@ class RoadAdvPredModelProd(nn.Module):
 
         m_target = torch.stack([m_road, m_intensity], dim=1)
 
-        return x_in, x_oracle, x_target, m_target
+        return x_in, x_oracle, x_target, m_target, x_traj
 
     def unpack_sample_road(self, x):
 
         x_present = x[:, 0:1]
         x_future = x[:, 2:3]
         x_full = x[:, 4:5]
+        x_traj = x[:, 6:7]
 
         x_target = x_full.clone()
 
@@ -136,7 +138,13 @@ class RoadAdvPredModelProd(nn.Module):
 
         m_target = m_road.unsqueeze(1)
 
-        return x_in, x_oracle, x_target, m_target
+        return x_in, x_oracle, x_target, m_target, x_traj
+
+    @staticmethod
+    def make_nonroad_intensity_zero(intensity, road, thres=0):
+        is_road_mask = (road > thres)
+        intensity[~is_road_mask] = 0
+        return intensity
 
     def forward(self, x_in, m_target):
         '''
@@ -211,6 +219,8 @@ if __name__ == '__main__':
     import pickle
     from argparse import ArgumentParser
 
+    import matplotlib as mpl
+    mpl.use('agg')  # Must be before pyplot import
     import matplotlib.pyplot as plt
 
     from datamodules.bev_datamodule import (BEVDataModule,
@@ -259,7 +269,7 @@ if __name__ == '__main__':
 
         x, _ = batch
 
-        x_in, x_oracle, x_target, m_target = model.unpack_sample(x)
+        x_in, x_oracle, x_target, m_target, x_traj = model.unpack_sample(x)
         # Remove future sample
         x_in = x_in[0:args.batch_size]
         x_oracle = x_oracle[0:args.batch_size]
@@ -268,9 +278,13 @@ if __name__ == '__main__':
         x_oracle = x_oracle.cuda()
         m_target = m_target.cuda()
 
+        # x: (B,2,H,W)
+        # m: (B,2,H,W)
         x_pred = model.forward(x_oracle, m_target)
         x_pred = x_pred.cpu()
 
+        # x_pred_in = model.forward(x_in_gpu, m_in)
+        # x_pred_in = x_pred_in.cpu()
         if bev_idx >= 1000:
             bev_idx = 0
             subdir_idx += 1
@@ -280,7 +294,12 @@ if __name__ == '__main__':
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
 
-        x = torch.concat([x_in, x_pred], dim=1)
+        x = torch.concat([x_in, x_pred, x_traj], dim=1)
+
+        x_in[:, 1:2] = 2 * x_in[:, 1:2] - 1
+        x_in[:,
+             1:2] = model.make_nonroad_intensity_zero(x_in[:, 1:2], x_in[:,
+                                                                         0:1])
 
         write_compressed_pickle(x, filename, output_path)
 
@@ -288,24 +307,28 @@ if __name__ == '__main__':
         x_pred = x_pred.cpu().numpy()
 
         num_rows = args.batch_size
-        num_cols = 4
+        num_cols = 5
 
         size_per_fig = 6
         _ = plt.figure(figsize=(size_per_fig * num_cols,
                                 size_per_fig * num_rows))
 
-        for idx in range(args.batch_size):
-            plt.subplot(num_rows, num_cols, 1 + 0 + idx * num_cols)
-            plt.imshow(x_in[idx, 0])
-            plt.subplot(num_rows, num_cols, 1 + 1 + idx * num_cols)
-            plt.imshow(x_in[idx, 1])
-            plt.subplot(num_rows, num_cols, 1 + 2 + idx * num_cols)
-            plt.imshow(x_pred[idx, 0])
-            plt.subplot(num_rows, num_cols, 1 + 3 + idx * num_cols)
-            plt.imshow(x_pred[idx, 1])
+        for sample_idx in range(args.batch_size):
+            plt.subplot(num_rows, num_cols, 1 + 0 + sample_idx * num_cols)
+            plt.imshow(x_in[sample_idx, 0])
+            plt.subplot(num_rows, num_cols, 1 + 1 + sample_idx * num_cols)
+            plt.imshow(x_in[sample_idx, 1])
+            plt.subplot(num_rows, num_cols, 1 + 2 + sample_idx * num_cols)
+            plt.imshow(x_pred[sample_idx, 0])
+            plt.subplot(num_rows, num_cols, 1 + 3 + sample_idx * num_cols)
+            plt.imshow(x_pred[sample_idx, 1])
+            plt.subplot(num_rows, num_cols, 1 + 4 + sample_idx * num_cols)
+            plt.imshow(x_traj[sample_idx, 0])
 
         plt.tight_layout()
         plt.savefig(output_path + f'fig_{bev_idx}.png')
+        plt.clf()
+        plt.close()
 
         bev_idx += 1
 
