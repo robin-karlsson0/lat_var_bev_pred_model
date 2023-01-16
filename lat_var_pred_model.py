@@ -132,6 +132,8 @@ class LatVarPredModel(pl.LightningModule):
 
         if self.sample_type == 'road':
             self.unpack_sample = self.unpack_sample_road
+        elif self.sample_type == 'nusc_road':
+            self.unpack_sample = self.unpack_sample_nusc_road
         else:
             raise IOError(f'Undefined type ({type})')
 
@@ -243,6 +245,67 @@ class LatVarPredModel(pl.LightningModule):
         x_present = x[:, 0:1]
         x_future = x[:, 2:3]
         x_full = x[:, 4:5]
+
+        x_target = x_full.clone()
+
+        # Probabilistic value range (0, 1) --> (-1, +1)
+        x_present[:, 0:1] = 2 * x_present[:, 0:1] - 1
+        x_future[:, 0:1] = 2 * x_future[:, 0:1] - 1
+        x_full[:, 0:1] = 2 * x_full[:, 0:1] - 1
+
+        x_in = torch.concat([x_present, x_future])
+        x_oracle = torch.concat([x_full, x_full])
+        x_target = torch.concat([x_target, x_target])
+
+        # Target value thresholding
+        POS_THRESH = 0.75
+        NEG_THRESH = 0.25
+
+        mask = x_target[:, 0] > POS_THRESH
+        x_target[mask, 0] = 1.
+        mask = x_target[:, 0] < NEG_THRESH
+        x_target[mask, 0] = 0.
+
+        m_road = ~(x_target[:, 0] == 0.5)
+        m_road[(x_target[:, 0] < POS_THRESH)
+               & (x_target[:, 0] > NEG_THRESH)] = False
+
+        m_target = m_road.unsqueeze(1)
+
+        return x_in, x_oracle, x_target, m_target
+
+    def unpack_sample_nusc_road(self, x):
+        '''
+        Tensor (19,256,256)
+            [0]:  road_present,      <--
+            [1]:  intensity_present,
+            [2]:  rgb_present[0],
+            [3]:  rgb_present[1],
+            [4]:  rgb_present[2],
+            [5]:  elevation_present,
+            [6]:  road_future,       <--
+            [7]:  intensity_future,
+            [8]:  rgb_future[0],
+            [9]:  rgb_future[1],
+            [10]: rgb_future[2],
+            [11]: elevation_future,
+            [12]: road_full,         <--
+            [13]: intensity_full,
+            [14]: rgb_full[0],
+            [15]: rgb_full[1],
+            [16]: rgb_full[2],
+            [17]: elevation_full,
+            [18]: traj_label,
+
+        Returns:
+            x_in: Input observation tensor in range (-1, 1)
+            x_oracle: Full observation tensor in range(-1, 1)
+            x_target: Thresholded full observation tensor in range (0, 1)
+            m_target: Mask of thresholded elements to use in objective
+        '''
+        x_present = x[:, 0:1]
+        x_future = x[:, 6:7]
+        x_full = x[:, 12:13]
 
         x_target = x_full.clone()
 
