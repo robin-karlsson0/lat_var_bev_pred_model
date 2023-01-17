@@ -40,6 +40,7 @@ class LatVarPredModel(pl.LightningModule):
         num_log_p_samples,
         test_sample_repeat,
         sample_type,
+        objective_type,
         **kwargs,
     ):
         super().__init__()
@@ -66,6 +67,13 @@ class LatVarPredModel(pl.LightningModule):
         self.prec_rec_samples = 10000
         self.unknown_viz_val = 0.5
         self.sample_type = sample_type
+
+        if objective_type == 'bce':
+            self.objective = self.binary_cross_entropy
+        elif objective_type == 'mse':
+            self.objective = self.mse
+        else:
+            raise IOError(f'Undefined objective type ({objective_type})')
 
         ############
         #  Models
@@ -124,6 +132,8 @@ class LatVarPredModel(pl.LightningModule):
 
         if self.sample_type == 'road':
             self.unpack_sample = self.unpack_sample_road
+        elif self.sample_type == 'nusc_road':
+            self.unpack_sample = self.unpack_sample_nusc_road
         else:
             raise IOError(f'Undefined type ({type})')
 
@@ -155,7 +165,17 @@ class LatVarPredModel(pl.LightningModule):
 
         # Avoid NaN for zero observation samples
         num_elems = (obs_mask.sum(dim=(-3, -2, -1)) + 1.)
-        return log_pxz.sum(dim=(-3, -2, -1)) / num_elems
+        return -log_pxz.sum(dim=(-3, -2, -1)) / num_elems
+
+    def mse(self, x_hat, x, obs_mask=None):
+        mse = (x - x_hat)**2
+
+        if obs_mask is not None:
+            mse = obs_mask * mse
+
+        # Avoid NaN for zero observation samples
+        num_elems = (obs_mask.sum(dim=(-3, -2, -1)) + 1.)
+        return mse.sum(dim=(-3, -2, -1)) / num_elems
 
     def kl_divergence(self, p_mu, p_std, q_mu, q_std):
         '''
@@ -225,6 +245,67 @@ class LatVarPredModel(pl.LightningModule):
         x_present = x[:, 0:1]
         x_future = x[:, 2:3]
         x_full = x[:, 4:5]
+
+        x_target = x_full.clone()
+
+        # Probabilistic value range (0, 1) --> (-1, +1)
+        x_present[:, 0:1] = 2 * x_present[:, 0:1] - 1
+        x_future[:, 0:1] = 2 * x_future[:, 0:1] - 1
+        x_full[:, 0:1] = 2 * x_full[:, 0:1] - 1
+
+        x_in = torch.concat([x_present, x_future])
+        x_oracle = torch.concat([x_full, x_full])
+        x_target = torch.concat([x_target, x_target])
+
+        # Target value thresholding
+        POS_THRESH = 0.75
+        NEG_THRESH = 0.25
+
+        mask = x_target[:, 0] > POS_THRESH
+        x_target[mask, 0] = 1.
+        mask = x_target[:, 0] < NEG_THRESH
+        x_target[mask, 0] = 0.
+
+        m_road = ~(x_target[:, 0] == 0.5)
+        m_road[(x_target[:, 0] < POS_THRESH)
+               & (x_target[:, 0] > NEG_THRESH)] = False
+
+        m_target = m_road.unsqueeze(1)
+
+        return x_in, x_oracle, x_target, m_target
+
+    def unpack_sample_nusc_road(self, x):
+        '''
+        Tensor (19,256,256)
+            [0]:  road_present,      <--
+            [1]:  intensity_present,
+            [2]:  rgb_present[0],
+            [3]:  rgb_present[1],
+            [4]:  rgb_present[2],
+            [5]:  elevation_present,
+            [6]:  road_future,       <--
+            [7]:  intensity_future,
+            [8]:  rgb_future[0],
+            [9]:  rgb_future[1],
+            [10]: rgb_future[2],
+            [11]: elevation_future,
+            [12]: road_full,         <--
+            [13]: intensity_full,
+            [14]: rgb_full[0],
+            [15]: rgb_full[1],
+            [16]: rgb_full[2],
+            [17]: elevation_full,
+            [18]: traj_label,
+
+        Returns:
+            x_in: Input observation tensor in range (-1, 1)
+            x_oracle: Full observation tensor in range(-1, 1)
+            x_target: Thresholded full observation tensor in range (0, 1)
+            m_target: Mask of thresholded elements to use in objective
+        '''
+        x_present = x[:, 0:1]
+        x_future = x[:, 6:7]
+        x_full = x[:, 12:13]
 
         x_target = x_full.clone()
 
@@ -482,7 +563,8 @@ class LatVarPredModel(pl.LightningModule):
         # road_pred = self.road_head(out_feat)
         # x_hat = road_pred
 
-        recon_loss = -self.binary_cross_entropy(x_hat, x_target, m_target)
+        # recon_loss = self.binary_cross_entropy(x_hat, x_target, m_target)
+        recon_loss = self.objective(x_hat, x_target, m_target)
 
         loss = recon_loss
 
@@ -542,12 +624,17 @@ class LatVarPredModel(pl.LightningModule):
         m_target_mix = torch.tile(m_target_mix, (1, self.y_dim, 1, 1, 1))
 
         # Find smallest reconstruction loss among all modes
-        recon_loss = -self.binary_cross_entropy(x_hats, x_target_mix,
-                                                m_target_mix)
-        recon_loss_min, _ = torch.min(recon_loss, dim=1)
-        k = torch.argmin(recon_loss, dim=1)
+        # recon_loss = self.binary_cross_entropy(x_hats, x_target_mix,
+        #                                         m_target_mix)
+        recon_loss_bce = self.binary_cross_entropy(x_hats, x_target_mix,
+                                                   m_target_mix)
+        recon_loss_mse = self.mse(x_hats, x_target_mix, m_target_mix)
+        recon_loss_bce_min, _ = torch.min(recon_loss_bce, dim=1)
+        recon_loss_mse_min, _ = torch.min(recon_loss_mse, dim=1)
+        k = torch.argmin(recon_loss_bce, dim=1)
 
-        self.log('val_recon', recon_loss_min.mean())
+        self.log('val_recon_bce', recon_loss_bce_min.mean(), sync_dist=True)
+        self.log('val_recon_mse', recon_loss_mse_min.mean(), sync_dist=True)
 
         self.logger.experiment.add_histogram('z_mu', z_mus, self.current_epoch)
         self.logger.experiment.add_histogram('z_std', z_stds,
@@ -558,9 +645,13 @@ class LatVarPredModel(pl.LightningModule):
         ############################
         x_oracle_hats, h, z_mus_oracle, z_stds_oracle = self.forward_oracle(
             x_in, x_oracle)
-        recon_loss = -self.binary_cross_entropy(x_oracle_hats, x_target,
-                                                m_target)
-        self.log('val_recon_oracle', recon_loss.mean())
+        # recon_loss = self.binary_cross_entropy(x_oracle_hats, x_target,
+        #                                         m_target)
+        recon_loss_bce = self.binary_cross_entropy(x_oracle_hats, x_target,
+                                                   m_target)
+        recon_loss_mse = self.mse(x_oracle_hats, x_target, m_target)
+        self.log('val_recon_oracle_bce', recon_loss_bce.mean(), sync_dist=True)
+        self.log('val_recon_oracle_mse', recon_loss_mse.mean(), sync_dist=True)
 
         self.logger.experiment.add_histogram('k',
                                              k,
@@ -768,6 +859,7 @@ class LatVarPredModel(pl.LightningModule):
         parser.add_argument('--test_sample_repeat', type=int, default=10)
         parser.add_argument('--sample_type', type=str, default='road')
         # parser.add_argument('', type=int, default=)
+        parser.add_argument('--objective_type', type=str, default='bce')
         return parent_parser
 
 
