@@ -17,7 +17,7 @@ class UnetEncoder(pl.LightningModule):
         '''
         super().__init__()
 
-        enc_blocks = self.parse_enc_string(enc_str)
+        enc_blocks = self.parse_blocks_string(enc_str)
 
         ##############
         #  Encoders
@@ -95,16 +95,10 @@ class UnetEncoder(pl.LightningModule):
         # Bottleneck
         x = self.bottleneck(x)
 
-        # return x, encoder_outs
-
-        # <-- For latent variable predictive model
-        x = x.flatten(start_dim=1)
-        x = self.fc_encoder(x)
-        return x
-        # -->
+        return x, encoder_outs
 
     @staticmethod
-    def parse_enc_string(enc_str):
+    def parse_blocks_string(enc_str):
         '''
         Args:
             enc_str: Sequence of (#layers, #filters)
@@ -124,6 +118,7 @@ class UnetDecoder(pl.LightningModule):
 
     def __init__(
         self,
+        enc_str: str,
         dec_str: str,
         bottleneck_ch,
         output_ch=1,
@@ -131,6 +126,9 @@ class UnetDecoder(pl.LightningModule):
         output_activation='sigmoid',
     ):
         '''
+        NOTE: Number of filters must be in exponentially increasing order
+              Ex: 2x16,2x32,2x64,2x128,2x256,2x512,2x1024,2x2048
+              
         Args:
             dec_str: Sequence of (#layers, #filters).
                 Ex: '2x256,2x128,2x64'
@@ -139,7 +137,8 @@ class UnetDecoder(pl.LightningModule):
         '''
         super().__init__()
 
-        dec_blocks = self.parse_dec_string(dec_str)
+        enc_blocks = self.parse_blocks_string(enc_str)
+        dec_blocks = self.parse_blocks_string(dec_str)
 
         self.upsample = nn.Upsample(scale_factor=2,
                                     mode="bilinear",
@@ -153,10 +152,19 @@ class UnetDecoder(pl.LightningModule):
         self.dec_blocks = nn.ModuleList()
         ch_prev = self.bottleneck_ch
 
-        for num_layers, num_filters in dec_blocks[:-1]:
+        num_blocks = len(dec_blocks)
+
+        for block_idx in range(num_blocks - 1):
+
+            num_layers, num_filters = dec_blocks[block_idx]
+            _, enc_filters = enc_blocks[num_blocks - block_idx - 1]
 
             dec_block = []
             for layer_idx in range(num_layers):
+                if layer_idx == 0 and block_idx != 0:
+                    ch_prev += enc_filters
+                # if layer_idx == num_layers - 1:
+                #     num_filters = num_filters // 2
                 dec_block.append(
                     nn.Conv2d(ch_prev,
                               num_filters,
@@ -173,7 +181,7 @@ class UnetDecoder(pl.LightningModule):
         dec_block = []
         for layer_idx in range(num_layers - 1):
             dec_block.append(
-                nn.Conv2d(ch_prev,
+                nn.Conv2d(ch_prev * 2,
                           num_filters,
                           kernel_size=3,
                           stride=1,
@@ -188,43 +196,29 @@ class UnetDecoder(pl.LightningModule):
             dec_block.append(nn.Sigmoid())
         elif output_activation == 'leaky_relu':
             dec_block.append(nn.LeakyReLU())
+        elif output_activation == 'relu':
+            dec_block.append(nn.ReLU())
         self.dec_blocks.append(nn.Sequential(*dec_block))
 
-        # <-- Input decoder for latent variable predictive model
-        feat_map_flatten_dim = self.bottleneck_ch * 2**2
-        self.fc_decoder = nn.Sequential(
-            nn.Linear(input_ch, input_ch, bias=False),
-            nn.BatchNorm1d(input_ch),
-            nn.LeakyReLU(),
-            nn.Linear(input_ch, feat_map_flatten_dim, bias=False),
-            nn.BatchNorm1d(feat_map_flatten_dim),
-            nn.LeakyReLU(),
-        )
-        # -->
-
-    def forward(self, x):
+    def forward(self, x, enc_outs):
         '''
         TODO:  Add in optional 'enc_outs: dict'
         '''
-
-        # <-- For latent variable predictive model
-        x = self.fc_decoder(x)
-        x = x.reshape(-1, self.bottleneck_ch, 2, 2)
-        # -->
+        x = self.dec_blocks[0](x)
 
         num_blocks = len(self.dec_blocks)
-        for idx in range(num_blocks):
+        for idx in range(1, num_blocks):
             x = self.upsample(x)
 
-            # res = x.shape[-1]
-            # enc_out = enc_outs[res]
-            # x = torch.cat((x, enc_out), dim=1)
+            res = x.shape[-1]
+            enc_out = enc_outs[res]
+            x = torch.cat((x, enc_out), dim=1)
             x = self.dec_blocks[idx](x)
 
         return x
 
     @staticmethod
-    def parse_dec_string(dec_str):
+    def parse_blocks_string(dec_str):
         '''
         Args:
             enc_str: Sequence of (#layers, #filters)
@@ -240,39 +234,19 @@ class UnetDecoder(pl.LightningModule):
         return dec_blocks
 
 
-# class Unet(pl.LightningModule):
-#     '''
-#     '''
-#
-#     def __init__(self,
-#                  input_size: int,
-#                  base_ch=64,
-#                  input_ch=1,
-#                  dropout_prob=0.):
-#         super().__init__()
-#
-#         self.encoder = UnetEncoder(input_size, base_ch, input_ch, dropout_prob)
-#         self.decoder = UnetDecoder(
-#             input_size,
-#             base_ch,
-#             input_ch,
-#             dropout_prob,
-#         )
-#
-#     def forward(self, x):
-#         pass
-
 if __name__ == '__main__':
 
-    input_size = 128
+    input_size = 256
     base_ch = 2
     input_ch = 1
 
     #############
     #  Encoder
     #############
-    enc_str = '2x32,2x64,2x128,2x256,2x256,2x512,2x512'
-    #           128   64    32    16     8     4     4
+    # enc_str = '2x64,2x128,2x256,2x512,2x1024'
+    # enc_str = '2x16,2x32,2x64,2x128,2x256,2x512,2x1024,2x2048'
+    enc_str = '2x32,2x32,2x64,2x64,2x128,2x128,2x256,2x256'
+    #           256   128    64    32     16
     unet_encoder = UnetEncoder(enc_str)
 
     x = torch.rand((32, input_ch, input_size, input_size))
@@ -285,12 +259,14 @@ if __name__ == '__main__':
     #############
     #  Decoder
     #############
-    dec_str = '2x512,2x256,2x256,2x128,2x64,2x32'
-    #              4     8    16    32   64  128
-    bottleneck_ch = 512
+    # dec_str = '1x1024,2x512,2x256,2x128,2x64'
+    # dec_str = '2x2048,2x1024,2x512,2x256,2x128,2x64,2x32,2x16'
+    dec_str = '2x256,2x256,2x128,2x128,2x64,2x64,2x32,2x32'
+    #              16    32    64   128  256
+    bottleneck_ch = 256
     output_ch = 1
-    unet_decoder = UnetDecoder(dec_str, bottleneck_ch, output_ch)
+    unet_decoder = UnetDecoder(enc_str, dec_str, bottleneck_ch, output_ch)
 
-    y = unet_decoder(x_bottleneck)
+    y = unet_decoder(x_bottleneck, enc_outs)
 
     print(f'{x_bottleneck.shape} --> {y.shape}')
