@@ -1,4 +1,5 @@
 import argparse
+import copy
 import glob
 import gzip
 import os
@@ -36,8 +37,8 @@ class BEVDatasetNusc(Dataset):
             os.path.relpath(path, self.abs_root_path)
             for path in self.sample_paths
         ]
-        if do_shuffle:
-            random.shuffle(self.sample_paths)
+        if not do_shuffle:
+            self.sample_paths = sorted(self.sample_paths)
 
         self.num_samples = len(self.sample_paths)
 
@@ -124,16 +125,33 @@ class BEVDatasetNusc(Dataset):
         #################################
         #  Make dense trajectory label
         #################################
-        # TODO: Include ALL tracked trajectories
-        poses = sample['poses_full']
-        # Poses: (N, 2) matrix with (i, j) coordinates
-        poses = poses[:, 0:2]
-        poses[:, 1] = 255 - poses[:, 1]
-        # Convert to point list
-        n = poses.shape[0]
-        traj = [(int(poses[idx, 0]), int(poses[idx, 1])) for idx in range(n)]
-        traj = self.remove_duplicate_pnts(traj)
-        traj_label = self.draw_trajectory(traj, 256, 256, traj_width=1)
+        traj_label = np.zeros((256, 256))
+        for traj in sample['trajs_full']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=1)
+            mask = traj == 1
+            traj_label[mask] = 1
+
+        #######################################
+        #  Make road under observed vehicles
+        #######################################
+        for traj in sample['trajs_present']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_present[mask] = 1
+
+        for traj in sample['trajs_future']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_future[mask] = 1
+
+        for traj in sample['trajs_full']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_full[mask] = 1
 
         input_tensor = np.stack([
             road_present,
@@ -164,6 +182,22 @@ class BEVDatasetNusc(Dataset):
             input_tensor = torch.rot90(input_tensor, k, (-2, -1))
 
         return input_tensor, torch.tensor([0])
+
+    def preproc_traj(self, traj: np.array):
+        '''
+        NOTE Need to make a copy to prevent overriding original trajectory.
+
+        Args:
+            traj: (N, 2) matrix with (i, j) coordinates.
+        '''
+        traj = copy.deepcopy(traj[:, 0:2])
+        traj[:, 1] = 255 - traj[:, 1]
+        # Convert to point list
+        n = traj.shape[0]
+        traj = [(int(traj[idx, 0]), int(traj[idx, 1])) for idx in range(n)]
+        traj = self.remove_duplicate_pnts(traj)
+
+        return traj
 
     @staticmethod
     def make_nonroad_intensity_zero(intensity, road, thres=0.5):
@@ -431,6 +465,7 @@ if __name__ == '__main__':
     parser.add_argument('--do_rotation', action='store_true')
     parser.add_argument('--do_shuffle', action='store_true')
     parser.add_argument('--do_masking', action='store_true')
+    parser.add_argument('--viz', action='store_true')
     args = parser.parse_args()
 
     batch_size = 1
@@ -463,7 +498,8 @@ if __name__ == '__main__':
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
 
-        viz_sample(input)
+        if args.viz:
+            viz_sample(input)
         write_compressed_pickle(input, filename, output_path)
 
         bev_idx += 1
