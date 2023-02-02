@@ -1,3 +1,5 @@
+import argparse
+import copy
 import glob
 import gzip
 import os
@@ -8,8 +10,6 @@ import cv2
 import numpy as np
 import pytorch_lightning as pl
 import torch
-# from scipy import ndimage
-# from scipy.spatial import distance
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -37,8 +37,8 @@ class BEVDataset(Dataset):
             os.path.relpath(path, self.abs_root_path)
             for path in self.sample_paths
         ]
-        if do_shuffle:
-            random.shuffle(self.sample_paths)
+        if not do_shuffle:
+            self.sample_paths = sorted(self.sample_paths)
 
         self.num_samples = len(self.sample_paths)
 
@@ -111,15 +111,33 @@ class BEVDataset(Dataset):
         #################################
         #  Make dense trajectory label
         #################################
-        poses = sample['poses_full']
-        # Poses: (N, 2) matrix with (i, j) coordinates
-        poses = poses[:, 0:2]
-        poses[:, 1] = 255 - poses[:, 1]
-        # Convert to point list
-        n = poses.shape[0]
-        traj = [(int(poses[idx, 0]), int(poses[idx, 1])) for idx in range(n)]
-        traj = self.remove_duplicate_pnts(traj)
-        traj_label = self.draw_trajectory(traj, 256, 256, traj_width=1)
+        traj_label = np.zeros((256, 256))
+        for traj in sample['trajs_full']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=1)
+            mask = traj == 1
+            traj_label[mask] = 1
+
+        #######################################
+        #  Make road under observed vehicles
+        #######################################
+        for traj in sample['trajs_present']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_present[mask] = 1
+
+        for traj in sample['trajs_future']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_future[mask] = 1
+
+        for traj in sample['trajs_full']:
+            traj = self.preproc_traj(traj)
+            traj = self.draw_trajectory(traj, 256, 256, traj_width=4)
+            mask = traj == 1
+            road_full[mask] = 1
 
         input_tensor = np.stack([
             road_present, intensity_present, road_future, intensity_future,
@@ -133,6 +151,22 @@ class BEVDataset(Dataset):
             input_tensor = torch.rot90(input_tensor, k, (-2, -1))
 
         return input_tensor, torch.tensor([0])
+
+    def preproc_traj(self, traj: np.array):
+        '''
+        NOTE Need to make a copy to prevent overriding original trajectory.
+
+        Args:
+            traj: (N, 2) matrix with (i, j) coordinates.
+        '''
+        traj = copy.deepcopy(traj[:, 0:2])
+        traj[:, 1] = 255 - traj[:, 1]
+        # Convert to point list
+        n = traj.shape[0]
+        traj = [(int(traj[idx, 0]), int(traj[idx, 1])) for idx in range(n)]
+        traj = self.remove_duplicate_pnts(traj)
+
+        return traj
 
     @staticmethod
     def make_nonroad_intensity_zero(intensity, road, thres=0.5):
@@ -169,11 +203,6 @@ class BEVDataset(Dataset):
 
             pnt_0 = traj[idx]
             pnt_1 = traj[idx + 1]
-
-            # pnt_0 = poses[idx].astype(int)
-            # pnt_1 = poses[idx + 1].astype(int)
-            # pnt_0 = tuple(pnt_0)
-            # pnt_1 = tuple(pnt_1)
 
             cv2.line(label, pnt_0, pnt_1, 1, traj_width)
 
@@ -347,22 +376,32 @@ if __name__ == '__main__':
     For creating static set of test samples.
     '''
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        'dataset_path',
+        type=str,
+        help='Absolute path to dataset root (i.e. ../dataset/).')
+    parser.add_argument('save_dir',
+                        type=str,
+                        help='Path to preprocessed sample save directory.')
+    parser.add_argument('--do_rotation', action='store_true')
+    parser.add_argument('--do_shuffle', action='store_true')
+    args = parser.parse_args()
+
     #    import matplotlib.pyplot as plt
 
     batch_size = 1
 
-    bev = BEVDataModule(
-        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_up_seq_07_new_aug',
-        '/home/robin/projects/pc-accumulation-lib/bev_kitti360_256px_up_seq_07_new_aug',
-        batch_size,
-        do_rotation=False)
-    dataloader = bev.train_dataloader(shuffle=False)
+    bev = BEVDataModule(args.dataset_path,
+                        args.dataset_path,
+                        batch_size,
+                        do_rotation=args.do_rotation)
+    dataloader = bev.train_dataloader(shuffle=args.do_shuffle)
 
     num_samples = len(bev.bev_dataset_train)
 
     bev_idx = 0
     subdir_idx = 0
-    savedir = 'bev_kitti360_256px_up_seq_07_new_aug_preproc'
 
     for idx, batch in enumerate(dataloader):
 
@@ -375,7 +414,7 @@ if __name__ == '__main__':
             bev_idx = 0
             subdir_idx += 1
         filename = f'bev_{bev_idx}.pkl'
-        output_path = f'./{savedir}/subdir{subdir_idx:03d}/'
+        output_path = f'./{args.save_dir}/subdir{subdir_idx:03d}/'
 
         if not os.path.isdir(output_path):
             os.makedirs(output_path)
@@ -386,30 +425,3 @@ if __name__ == '__main__':
 
         if idx % 100 == 0:
             print(f'idx {idx} / {num_samples} ({idx/num_samples*100:.2f}%)')
-
-#        road_present = input[:, 0]
-#        intensity_present = input[:, 1]
-#        road_future = input[:, 2]
-#        intensity_future = input[:, 3]
-#        road_full = input[:, 4]
-#        intensity_full = input[:, 5]
-#
-#        print(idx)
-#        for batch_idx in range(batch_size):
-#            # Present
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 1)
-#            plt.imshow(road_present[batch_idx].numpy())
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 2)
-#            plt.imshow(intensity_present[batch_idx].numpy())
-#            # Future
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 3)
-#            plt.imshow(road_future[batch_idx].numpy())
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 4)
-#            plt.imshow(intensity_future[batch_idx].numpy())
-#            # Full
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 5)
-#            plt.imshow(road_full[batch_idx].numpy())
-#            plt.subplot(batch_size, 6, batch_idx * 6 + 6)
-#            plt.imshow(intensity_full[batch_idx].numpy())
-#
-#        plt.show()
