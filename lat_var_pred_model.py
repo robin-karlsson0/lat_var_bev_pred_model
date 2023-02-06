@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from modules.large_mnist_decoder import LargeMNISTExpDecoder
-from modules.large_mnist_encoder import LargeMNISTExpEncoder
+# from modules.large_mnist_decoder import LargeMNISTExpDecoder
+# from modules.large_mnist_encoder import LargeMNISTExpEncoder
 from modules.unet import UnetDecoder, UnetEncoder
 
 
@@ -307,12 +307,42 @@ class LatVarPredModel(pl.LightningModule):
         x_future = x[:, 6:7]
         x_full = x[:, 12:13]
 
+        # (road, RGB, elevation)
+        # x_present = torch.concat((x[:, 0:1], x[:, 2:5], x[:, 5:6]), dim=1)
+        # x_future = torch.concat((x[:, 6:7], x[:, 8:11], x[:, 11:12]), dim=1)
+        # x_full = torch.concat((x[:, 12:13], x[:, 14:17], x[:, 17:18]), dim=1)
+
         x_target = x_full.clone()
 
         # Probabilistic value range (0, 1) --> (-1, +1)
         x_present[:, 0:1] = 2 * x_present[:, 0:1] - 1
         x_future[:, 0:1] = 2 * x_future[:, 0:1] - 1
         x_full[:, 0:1] = 2 * x_full[:, 0:1] - 1
+
+        # Normalize RGB
+        # x_present[:, 1:4] -= 0.5
+        # x_present[:, 1:4] *= 2
+        # x_future[:, 1:4] -= 0.5
+        # x_future[:, 1:4] *= 2
+        # x_full[:, 1:4] -= 0.5
+        # x_full[:, 1:4] *= 2
+
+        # Threshold and normalize elevation
+        # elev = x_present[:, 4]
+        # elev[elev < -2] = -2
+        # elev[elev > 2] = 2
+        # elev /= 2
+        # x_present[:, 4] = elev
+        # elev = x_future[:, 4]
+        # elev[elev < -2] = -2
+        # elev[elev > 2] = 2
+        # elev /= 2
+        # x_future[:, 4] = elev
+        # elev = x_full[:, 4]
+        # elev[elev < -2] = -2
+        # elev[elev > 2] = 2
+        # elev /= 2
+        # x_full[:, 4] = elev
 
         x_in = torch.concat([x_present, x_future])
         x_oracle = torch.concat([x_full, x_full])
@@ -786,6 +816,7 @@ class LatVarPredModel(pl.LightningModule):
             x_hat_vizs.append(x_hat_viz)
         x_hat_vizs = np.concatenate(x_hat_vizs)
 
+        # Extract 'road' input only --> [0]
         viz = np.concatenate((x_viz, x_hat_vizs))
 
         return viz
@@ -866,7 +897,7 @@ class LatVarPredModel(pl.LightningModule):
 if __name__ == '__main__':
     from argparse import ArgumentParser
 
-    from datamodules.bev_datamodule import BEVDataModule
+    from datamodules.bev_datamodule_nusc import BEVDataModule
 
     parser = ArgumentParser()
     parser.add_argument('--train_data_dir', type=str)
@@ -888,7 +919,6 @@ if __name__ == '__main__':
         val_data_dir=args.val_data_dir,
         batch_size=args.batch_size,
         do_rotation=True,
-        do_extrapolation=False,
         do_masking=False,
         use_preproc=True,
         num_workers=args.num_workers,
