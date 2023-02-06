@@ -244,8 +244,9 @@ class BEVDatasetNusc(Dataset):
                 pkl_obj = f.read()
                 obj = pickle.loads(pkl_obj)
                 return obj
-        except IOError as error:
+        except Exception as error:
             print(error)
+            print('path:', path)
 
 
 class PreprocBEVDataset(BEVDatasetNusc):
@@ -500,7 +501,8 @@ if __name__ == '__main__':
 
         if args.viz:
             viz_sample(input)
-        write_compressed_pickle(input, filename, output_path)
+        else:
+            write_compressed_pickle(input, filename, output_path)
 
         bev_idx += 1
 
