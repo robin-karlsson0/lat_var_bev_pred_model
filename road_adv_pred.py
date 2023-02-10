@@ -502,8 +502,8 @@ class RoadAdvPredModel(pl.LightningModule):
 
             self.log_dict({
                 'train_adv': loss_adv,
-                'val_real_acc': real_pred_acc.mean(),
-                'val_fake_acc': fake_pred_acc.mean(),
+                'train_real_acc': real_pred_acc.mean(),
+                'train_fake_acc': fake_pred_acc.mean(),
             })
 
             return loss_adv
@@ -601,10 +601,6 @@ class RoadAdvPredModel(pl.LightningModule):
         self.log('val_adv', adv_loss.mean(), sync_dist=True)
         self.log('val_real_acc', real_pred_acc.mean(), sync_dist=True)
         self.log('val_fake_acc', fake_pred_acc.mean(), sync_dist=True)
-
-        # Remove non-road intensity values
-        m_oracle_int = torch.logical_and(x_pred_road, m_oracle_int)
-        x_oracle_int[~m_oracle_int] = 0
 
         if batch_idx == 0 and self.current_epoch % 1 == 0:
             #####################################
@@ -804,8 +800,8 @@ if __name__ == '__main__':
 
     dict_args = vars(args)
     model = RoadAdvPredModel(**dict_args)
-    # model = RoadAdvPredModel.load_from_checkpoint(
-    #     'lightning_logs/version_0/checkpoints/epoch=14-step=4695.ckpt')
+    model = RoadAdvPredModel.load_from_checkpoint(
+        'lightning_logs/version_5431823/checkpoints/epoch=61-step=25854.ckpt')
     trainer = pl.Trainer.from_argparse_args(args)
 
     bev = BEVDataModule(
