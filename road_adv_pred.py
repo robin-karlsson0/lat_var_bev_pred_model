@@ -1,7 +1,8 @@
 import pickle
 
 import matplotlib as mpl
-# mpl.use('agg')  # Must be before pyplot import to avoid memory leak
+
+mpl.use('agg')  # Must be before pyplot import to avoid memory leak
 import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
@@ -32,6 +33,7 @@ class RoadAdvPredModel(pl.LightningModule):
         sample_type,
         objective_type,
         lat_var_pred_model_ckpt_path,
+        road_thresh,
         **kwargs,
     ):
         super().__init__()
@@ -51,6 +53,8 @@ class RoadAdvPredModel(pl.LightningModule):
         self.prec_rec_samples = 10000
         self.unknown_viz_val = 0.5
         self.sample_type = sample_type
+
+        self.road_thresh = road_thresh
 
         if objective_type == 'bce':
             self.objective = self.binary_cross_entropy
@@ -401,8 +405,10 @@ class RoadAdvPredModel(pl.LightningModule):
         #  Texture prediction
         ########################
         # Replace 'observed' road with 'obs + pred' road
-        x_pred_road = integrate_obs_and_lat_pred(x_oracle_road, x_pred_road,
-                                                 m_oracle_road)
+        x_pred_road = integrate_obs_and_lat_pred(x_oracle_road,
+                                                 x_pred_road,
+                                                 m_oracle_road,
+                                                 threshold=self.road_thresh)
 
         x_oracle_aug = x_oracle.clone()
         x_oracle_aug[:, 0:1] = x_pred_road
@@ -412,11 +418,19 @@ class RoadAdvPredModel(pl.LightningModule):
         m_int_fake = torch.logical_and(x_pred_road, ~m_oracle_int)
         m_rgb_fake = torch.logical_and(x_pred_road, ~m_oracle_rgb)
 
+        # Remove non-road intensity values
+        x_oracle_aug[:, 1:2][~x_pred_road.bool()] = 0
+        # Remove non-road RGB values
+        x_oracle_aug[:, 2:5][torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
+
         # Train generator
         if optimizer_idx == 0:
             x_pred_int_rgb = self.forward(x_oracle_aug)
 
-            # recon_loss = self.mse(x_pred_int, x_oracle_int, m_oracle_int)
+            # Compare (int, rgb)
+            x_oracle_aug_int_rgb = x_oracle_aug[:, 1:]
+            recon_loss = self.mse(x_pred_int_rgb, x_oracle_aug_int_rgb,
+                                  m_int_real)
 
             # Replace False elements with generated elements
             x_oracle_int_adv[m_int_fake] = x_pred_int_rgb[:, 0:1][m_int_fake]
@@ -426,6 +440,11 @@ class RoadAdvPredModel(pl.LightningModule):
 
             x_oracle = torch.concat(
                 [x_pred_road, x_oracle_int_adv, x_oracle_rgb_adv], dim=1)
+
+            # Remove non-road intensity values
+            x_oracle[:, 1:2][~x_pred_road.bool()] = 0
+            # Remove non-road RGB values
+            x_oracle[:, 2:5][torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
 
             x_oracle_norm = 2 * x_oracle - 1
             real_pred = self.forward_adv(x_oracle_norm)
@@ -437,12 +456,12 @@ class RoadAdvPredModel(pl.LightningModule):
                                                  torch.ones_like(real_pred),
                                                  obs_mask=m_int_fake)
 
-            # loss = recon_loss + gen_loss
-            loss = gen_loss
+            loss = recon_loss + gen_loss
+            # loss = gen_loss
             loss = loss.mean()
 
             self.log_dict({
-                # 'train_recon': recon_loss.mean(),
+                'train_recon': recon_loss.mean(),
                 'train_gen': gen_loss.mean(),
             })
 
@@ -463,13 +482,18 @@ class RoadAdvPredModel(pl.LightningModule):
             x_oracle = torch.concat([x_pred_road, x_oracle_int, x_oracle_rgb],
                                     dim=1)
 
+            # Remove non-road intensity values
+            x_oracle[:, 1:2][~x_pred_road.bool()] = 0
+            # Remove non-road RGB values
+            x_oracle[:, 2:5][torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
+
             x_oracle_norm = 2 * x_oracle - 1
             real_pred = self.forward_adv(x_oracle_norm)
 
             # Want discriminator to correctly predict real (1) and fake (0)
             # elements
             loss_adv = self.binary_cross_entropy(real_pred,
-                                                 m_oracle_int.float(),
+                                                 m_int_real.float(),
                                                  obs_mask=x_pred_road)
             loss_adv = loss_adv.mean()
 
@@ -487,7 +511,6 @@ class RoadAdvPredModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
 
         x, _ = batch
-        # device = x.get_device()
 
         #########################
         #  Representations
@@ -514,16 +537,11 @@ class RoadAdvPredModel(pl.LightningModule):
         #  Texture prediction
         ########################
         # Replace 'observed' road with 'obs + pred' road
-        x_pred_road = integrate_obs_and_lat_pred(x_oracle_road, x_pred_road,
-                                                 m_oracle_road)
+        x_pred_road = integrate_obs_and_lat_pred(x_oracle_road,
+                                                 x_pred_road,
+                                                 m_oracle_road,
+                                                 threshold=self.road_thresh)
         x_oracle[:, 0:1] = x_pred_road
-
-        # Remove non-road intensity values
-        m_oracle_int = torch.logical_and(x_pred_road, m_oracle_int)
-        x_oracle_int[~m_oracle_int] = 0
-
-        # Remove non-road RGB values
-        x_oracle_rgb[torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
 
         m_int_real = torch.logical_and(x_pred_road, m_oracle_int)
         m_int_fake = torch.logical_and(x_pred_road, ~m_oracle_int)
@@ -532,6 +550,11 @@ class RoadAdvPredModel(pl.LightningModule):
         # m_rgb_real = torch.logical_and(x_pred_road, m_oracle_rgb)
         m_rgb_fake = torch.logical_and(x_pred_road, ~m_oracle_rgb)
         # m_rgb_all = torch.logical_or(m_rgb_real, m_rgb_fake)
+
+        # Remove non-road intensity values
+        x_oracle[:, 1:2][~x_pred_road.bool()] = 0
+        # Remove non-road RGB values
+        x_oracle[:, 2:5][torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
 
         x_pred_int_rgb = self.forward(x_oracle)
 
@@ -544,9 +567,21 @@ class RoadAdvPredModel(pl.LightningModule):
         x_oracle = torch.concat([x_pred_road, x_oracle_int, x_oracle_rgb],
                                 dim=1)
 
+        # Remove non-road intensity values
+        x_oracle[:, 1:2][~x_pred_road.bool()] = 0
+        # Remove non-road RGB values
+        x_oracle[:, 2:5][torch.tile(~x_pred_road.bool(), (1, 3, 1, 1))] = 0
+
         # Transform (0,1) --> (-1,1)
         x_oracle_norm = 2 * x_oracle - 1
         real_pred = self.forward_adv(x_oracle_norm)  # (B, 1, H, W)
+
+        # Want the generator to fool discriminator so that all fake
+        # elements (0) are predicted as real elements (1)
+        #     ==> Optimize {fake elements} --> 1
+        gen_loss = self.binary_cross_entropy(real_pred,
+                                             torch.ones_like(real_pred),
+                                             obs_mask=m_int_fake)
 
         # recon_loss = self.mse(x_pred_int, x_oracle_int, m_oracle_int)
         adv_loss = self.binary_cross_entropy(real_pred,
@@ -562,9 +597,14 @@ class RoadAdvPredModel(pl.LightningModule):
 
         # self.log('val_loss', loss, sync_dist=True)
         # self.log('val_recon', recon_loss.mean(), sync_dist=True)
+        self.log('val_gen', gen_loss.mean(), sync_dist=True)
         self.log('val_adv', adv_loss.mean(), sync_dist=True)
         self.log('val_real_acc', real_pred_acc.mean(), sync_dist=True)
         self.log('val_fake_acc', fake_pred_acc.mean(), sync_dist=True)
+
+        # Remove non-road intensity values
+        m_oracle_int = torch.logical_and(x_pred_road, m_oracle_int)
+        x_oracle_int[~m_oracle_int] = 0
 
         if batch_idx == 0 and self.current_epoch % 1 == 0:
             #####################################
@@ -593,11 +633,11 @@ class RoadAdvPredModel(pl.LightningModule):
             num_pairs = num_viz_samples // 2
             viz = self.reorganize_viz_pairs(viz, num_pairs, res)
 
-            rows = 3
+            rows = 4
             size_per_fig = 8
             plt.figure(figsize=((num_viz_samples * size_per_fig,
                                  rows * size_per_fig)))
-            plt.imshow(viz, vmin=0, vmax=1)
+            plt.imshow(viz)
             plt.tight_layout()
 
             # for sample_idx in range(num_viz_samples):
@@ -742,6 +782,7 @@ class RoadAdvPredModel(pl.LightningModule):
         # parser.add_argument('', type=int, default=)
         parser.add_argument('--objective_type', type=str, default='mse')
         parser.add_argument('--lat_var_pred_model_ckpt_path', type=str)
+        parser.add_argument('--road_thresh', type=float, default=0.5)
         return parent_parser
 
 

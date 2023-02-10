@@ -17,7 +17,8 @@ def integrate_obs_and_lat_pred(x_obs,
     else:
         x_int = x_pred.clone()
 
-    x_int[m_obs] = x_obs[m_obs]
+    # To do, or not to do ... ?
+    # x_int[m_obs] = x_obs[m_obs]
 
     mask = x_int < threshold
     x_int[mask] = 0
