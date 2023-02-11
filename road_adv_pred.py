@@ -800,8 +800,8 @@ if __name__ == '__main__':
 
     dict_args = vars(args)
     model = RoadAdvPredModel(**dict_args)
-    model = RoadAdvPredModel.load_from_checkpoint(
-        'lightning_logs/version_5431823/checkpoints/epoch=61-step=25854.ckpt')
+    # model = RoadAdvPredModel.load_from_checkpoint(
+    #     'lightning_logs/version_5431823/checkpoints/epoch=61-step=25854.ckpt')
     trainer = pl.Trainer.from_argparse_args(args)
 
     bev = BEVDataModule(
